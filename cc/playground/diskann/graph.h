@@ -1,5 +1,8 @@
 // Implementation of graph data structure for DiskANN
 // variable num_nbrs value implementation borrowed from test/compact_test.cc
+// fixed size key implementation borrowed from test/test_types.h
+// Author: Suhas Jayaram Subramanya (suhasj@cs.cmu.edu)
+
 #include <atomic>
 #include <cinttypes>
 #include <cstdint>
@@ -42,15 +45,15 @@ public:
 };
 using Key = FixedSizeKey<uint32_t>;
 
-// forward declaration to declare friends for Value
+// forward declaration to declare friends for FlexibleValue
 class GraphUpsertContext;
 class GraphReadContext;
 // variable num_nbrs value implementation borrowed from test/compact_test.cc
 // size: size of buffer needed to hold this value object in memory (bytes)
-// num_nbrs: number of neighbors contained in this Value
-class Value {
+// num_nbrs: number of neighbors contained in this FlexibleValue
+class FlexibleValue {
 public:
-  Value() : size_{sizeof(Value)}, num_nbrs_{0} {}
+  FlexibleValue() : size_{sizeof(FlexibleValue)}, num_nbrs_{0} {}
 
   inline uint32_t size() const {
     return sizeof(*this) + num_nbrs_ * sizeof(uint32_t);
@@ -61,17 +64,17 @@ public:
   friend class GraphReadContext;
 
 private:
-  // size of this value object in bytes = sizeof(Value) + num_nbrs_ *
+  // size of this value object in bytes = sizeof(FlexibleValue) + num_nbrs_ *
   // sizeof(uint32_t)
   uint32_t size_;
   // sizeof(uint32_t) bytes per neighbor
   uint32_t num_nbrs_;
 
-  // where to read the data in this Value object?
+  // where to read the data in this FlexibleValue object?
   inline const uint32_t *buffer() const {
     return reinterpret_cast<const uint32_t *>(this + 1);
   }
-  // where to write data into in this Value object?
+  // where to write data into in this FlexibleValue object?
   inline uint32_t *buffer() { return reinterpret_cast<uint32_t *>(this + 1); }
 };
 
@@ -79,7 +82,7 @@ private:
 class GraphUpsertContext : public IAsyncContext {
 public:
   typedef Key key_t;
-  typedef Value value_t;
+  typedef FlexibleValue value_t;
 
   // key: node ID
   // nbrs: list of neighbors
@@ -93,20 +96,20 @@ public:
 
   /// The implicit and explicit interfaces require a key() accessor.
   inline const Key &key() const { return key_; }
-  // size of this value object in bytes = sizeof(Value) + 4B * num_nbrs_
+  // size of this value object in bytes = sizeof(FlexibleValue) + 4B * num_nbrs_
   inline uint32_t value_size() const {
-    return sizeof(Value) + (num_nbrs_ * sizeof(uint32_t));
+    return sizeof(FlexibleValue) + (num_nbrs_ * sizeof(uint32_t));
   }
 
   /// Non-atomic and atomic Put() methods.
-  inline void Put(Value &value) {
+  inline void Put(FlexibleValue &value) {
     // store num_nbrs and buffer in this value object
     value.num_nbrs_ = num_nbrs_;
     std::memcpy((void *)value.buffer(), (void *)nbrs_,
                 num_nbrs_ * sizeof(uint32_t));
   }
 
-  inline bool PutAtomic(Value &value) {
+  inline bool PutAtomic(FlexibleValue &value) {
     std::cout
         << "PutAtomic() called on node ID: {key_.key}, no atomic PUT available"
         << std::endl;
@@ -132,7 +135,7 @@ private:
 class GraphReadContext : public IAsyncContext {
 public:
   typedef Key key_t;
-  typedef Value value_t;
+  typedef FlexibleValue value_t;
 
   // key: node ID
   // output_buffer:
@@ -149,14 +152,14 @@ public:
   /// The implicit and explicit interfaces require a key() accessor.
   inline const Key &key() const { return key_; }
 
-  inline void Get(const Value &value) {
+  inline void Get(const FlexibleValue &value) {
     // set number of nbrs
     *output_num_nbrs = value.num_nbrs_;
     // copy nbrs into output buffer
     std::memcpy((void *)output_nbrs, (void *)value.buffer(),
                 value.num_nbrs_ * sizeof(uint32_t));
   }
-  inline void GetAtomic(const Value &value) {
+  inline void GetAtomic(const FlexibleValue &value) {
     // set number of nbrs
     *output_num_nbrs = value.num_nbrs_;
     // copy nbrs into output buffer
@@ -181,6 +184,6 @@ public:
   uint32_t *output_nbrs = nullptr;
 };
 
-typedef FasterKv<Key, Value, FASTER::device::NullDisk> MemIndex;
+typedef FasterKv<Key, FlexibleValue, FASTER::device::NullDisk> MemGraph;
 
 } // namespace diskann
