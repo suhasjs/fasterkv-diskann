@@ -33,6 +33,10 @@ private:
   uint64_t faster_memory_size_ = 0;
   std::string faster_graph_path_ = "";
 
+  // extra config params
+  // whether to verify after loading graph data
+  bool verify_after_load_ = false;
+
 public:
   FasterVamanaIndex(const uint64_t num_points, const uint64_t dim,
                     const std::string &index_load_path)
@@ -94,7 +98,7 @@ public:
     graph_reader.seekg(24, std::ios::beg);
     // read and upsert graph data
     uint32_t node_id, num_nbrs;
-    uint32_t nbrs[approx_degree];
+    uint32_t *nbrs = new uint32_t[128];
     for (uint32_t i = 0; i < this->num_points_; i++) {
       node_id = i;
       // read num neighbors
@@ -104,7 +108,59 @@ public:
                         sizeof(uint32_t) * num_nbrs);
       // upsert into FASTER store
       this->Upsert(node_id, nbrs, num_nbrs);
+
+      // update max degree
+      this->max_degree_ = std::max(this->max_degree_, (uint64_t)num_nbrs);
     }
+
+    // round up max degree to nearest multiple of 8
+    this->max_degree_ = ROUND_UP(this->max_degree_, 8);
+    std::cout << "Max degree = " << this->max_degree_ << std::endl;
+
+    // go back and verify all inserted data
+    if (this->verify_after_load_) {
+      std::cout << "Verifying inserted data" << std::endl;
+      uint32_t num_nbrs2, *nbrs2 = new uint32_t[128];
+      graph_reader.close();
+      graph_reader.open(index_load_path, std::ios::in | std::ios::binary);
+      graph_reader.seekg(24, std::ios::beg);
+      // read graph data
+      for (uint32_t i = 0; i < this->num_points_; i++) {
+        node_id = i;
+        // read num neighbors from disk
+        graph_reader.read(reinterpret_cast<char *>(&num_nbrs),
+                          sizeof(uint32_t));
+        // read all neighbros from disk
+        graph_reader.read(reinterpret_cast<char *>(nbrs),
+                          sizeof(uint32_t) * num_nbrs);
+        // read both from FASTER store
+        this->Read(node_id, nbrs2, num_nbrs2);
+        // verify
+        if (num_nbrs != num_nbrs2) {
+          std::cout << "ERROR: num_nbrs mismatch for node " << node_id
+                    << " (disk = " << num_nbrs << ", FASTER = " << num_nbrs2
+                    << ")" << std::endl;
+          exit(1);
+        }
+        for (uint32_t j = 0; j < num_nbrs; j++) {
+          if (nbrs[j] != nbrs2[j]) {
+            std::cout << "ERROR: nbrs mismatch for node " << node_id
+                      << " (disk = " << nbrs[j] << ", FASTER = " << nbrs2[j]
+                      << ")" << std::endl;
+            exit(1);
+          }
+        }
+      }
+      delete[] nbrs2;
+    }
+    delete[] nbrs;
+
+    std::cout << "Finished loading graph data and verifying insertion into "
+                 "FASTER store"
+              << std::endl;
+
+    // close graph file
+    graph_reader.close();
   }
 
   ~FasterVamanaIndex() {
@@ -142,6 +198,8 @@ public:
     auto result = this->graph_->Upsert(context, callback, 1);
     if (result != Status::Ok) {
       std::cout << "Upsert failed with status " << result << std::endl;
+    } else {
+      // std::cout << "upsert nnbrs: " << num_nbrs << std::endl;
     }
   }
 
@@ -152,7 +210,7 @@ public:
   //       num_nbrs: number of neighbors (uint32_t)
   // Ensure `nbrs` has space to write least `max_degree_` elements
   void Read(uint32_t node_id, uint32_t *nbrs, uint32_t &num_nbrs) {
-    std::cout << "Reading key:" << node_id << std::endl;
+    // std::cout << "Reading key:" << node_id << std::endl;
     auto callback = [](IAsyncContext *ctxt, Status result) {
       std::cout
           << "Read completed for key: "
@@ -169,8 +227,8 @@ public:
       std::cout << "Read failed with status " << result << std::endl;
     }
 
-    std::cout << "Read " << num_nbrs << " neighbors for key " << node_id
-              << std::endl;
+    // std::cout << "Read " << num_nbrs << " neighbors for key " << node_id <<
+    // std::endl;
   }
 };
 } // namespace diskann

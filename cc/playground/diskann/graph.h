@@ -165,8 +165,8 @@ public:
     // copy nbrs into output buffer
     std::memcpy((void *)output_nbrs, (void *)value.buffer(),
                 value.num_nbrs_ * sizeof(uint32_t));
-    std::cout << "GetAtomic() called on node ID: {key_.key}, no atomic GET"
-              << std::endl;
+    // std::cout << "GetAtomic() called on node ID: " << key_.key << ", no
+    // atomic GET" << std::endl;
   }
 
 protected:
@@ -180,7 +180,6 @@ private:
 
 public:
   uint32_t *output_num_nbrs = nullptr;
-  // Extract two bytes of output.
   uint32_t *output_nbrs = nullptr;
 };
 
