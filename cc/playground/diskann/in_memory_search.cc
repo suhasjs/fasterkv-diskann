@@ -12,9 +12,10 @@ using namespace FASTER::core;
 
 int main(int argc, char *argv[]) {
   // assume float data type for now
-  if (argc < 4) {
+  if (argc < 8) {
     std::cout << "Usage (only float vectors supported): " << argv[0]
-              << " <index_prefix> <num_pts> <dim>" << std::endl;
+              << " <index_prefix> <num_pts> <dim> <query_bin> <gt_bin> <k> <L>"
+              << std::endl;
     exit(0);
   }
 
@@ -22,14 +23,21 @@ int main(int argc, char *argv[]) {
   std::string index_prefix = argv[1];
   uint32_t num_pts = std::stoi(argv[2]);
   uint32_t dim = std::stoi(argv[3]);
+  std::string query_bin = argv[4];
+  std::string gt_bin = argv[5];
+  uint32_t k_NN = std::stoi(argv[6]);
+  uint32_t L_search = std::stoi(argv[7]);
 
   // create index
   std::cout << "Creating FasterVamanaIndex with FASTER NullDisk " << std::endl;
   diskann::FasterVamanaIndex index(num_pts, dim, index_prefix);
-
   // start a session (akin to FASTER KV::StartSession)
   index.StartSession();
   std::cout << "Started session " << std::endl;
+
+  // load index
+  std::cout << "Loading index " << std::endl;
+  index.load();
 
   // stop session
   index.StopSession();

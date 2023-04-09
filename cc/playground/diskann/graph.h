@@ -3,6 +3,7 @@
 // fixed size key implementation borrowed from test/test_types.h
 // Author: Suhas Jayaram Subramanya (suhasj@cs.cmu.edu)
 
+#pragma once
 #include <atomic>
 #include <cinttypes>
 #include <cstdint>

@@ -1,6 +1,7 @@
 // Implementation of a Vamana index (purely in-memory, using a FASTER NullDisk)
 // Author: Suhas Jayaram Subramanya (suhasj@cs.cmu.edu)
 
+#pragma once
 #include <atomic>
 #include <cinttypes>
 #include <cstdint>
@@ -27,6 +28,7 @@ private:
   uint32_t start_ = 0;
 
   // index parameters
+  std::string index_load_path_ = "";
 
   // FASTER store params
   uint64_t faster_max_keys_ = 0;
@@ -40,7 +42,7 @@ private:
 public:
   FasterVamanaIndex(const uint64_t num_points, const uint64_t dim,
                     const std::string &index_load_path)
-      : num_points_{num_points}, dim_{dim} {
+      : num_points_{num_points}, dim_{dim}, index_load_path_{index_load_path} {
     /*** 1. Load vector data ****/
     std::string data_path = index_load_path + ".data";
     // round up dim to multiple of 16 (good alignment for AVX ops)
@@ -81,18 +83,24 @@ public:
     // min FASTER log size is 1 GB
     if (this->faster_memory_size_ < MIN_FASTER_LOG_SIZE)
       this->faster_memory_size_ = MIN_FASTER_LOG_SIZE;
-    std::cout << "Setting FASTER store memory size to "
+    std::cout << "Configuring FASTER store memory size to "
               << this->faster_memory_size_ / (1 << 20)
               << " MB, per key memory = " << per_key_memory << std::endl;
-
     /*** 3. Create FASTER store ****/
     this->graph_ =
         new diskann::MemGraph(this->faster_max_keys_, this->faster_memory_size_,
                               this->faster_graph_path_);
     std::cout << "Created FASTER store for VamanaIndex" << std::endl;
+    std::cout << "Finished configuring index. Call load() to load graph into "
+                 "FASTER store."
+              << std::endl;
+  }
 
+  // separated load() to call StartSession() before upserting graph data
+  void load() {
     /*** 4. Load graph data ****/
-    std::ifstream graph_reader(index_load_path,
+    std::cout << "Loading graph data into FASTER store" << std::endl;
+    std::ifstream graph_reader(this->index_load_path_,
                                std::ios::in | std::ios::binary);
     // 24-byte header for Vamana graph
     graph_reader.seekg(24, std::ios::beg);
@@ -122,7 +130,8 @@ public:
       std::cout << "Verifying inserted data" << std::endl;
       uint32_t num_nbrs2, *nbrs2 = new uint32_t[128];
       graph_reader.close();
-      graph_reader.open(index_load_path, std::ios::in | std::ios::binary);
+      graph_reader.open(this->index_load_path_,
+                        std::ios::in | std::ios::binary);
       graph_reader.seekg(24, std::ios::beg);
       // read graph data
       for (uint32_t i = 0; i < this->num_points_; i++) {
