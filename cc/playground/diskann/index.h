@@ -8,9 +8,11 @@
 #include <cstdio>
 #include <iostream>
 #include <string>
+#include <unordered_set>
 
 #include "graph.h"
 #include "io_utils.h"
+#include "search_utils.h"
 
 #include "../src/core/faster.h"
 
@@ -238,6 +240,111 @@ public:
 
     // std::cout << "Read " << num_nbrs << " neighbors for key " << node_id <<
     // std::endl;
+  }
+
+  /*** Query ***/
+  // Query for k nearest neighbors
+  // ensure L_search < PQ_DEFAULT_SIZE --> priority queue size
+  void search(const float *query, const uint32_t k_NN, const uint32_t L_search,
+              uint32_t *knn_idxs, float *knn_dists) {
+    // initialize priority queue of neighbors
+    CloserPQ unexplored_front, explored_front;
+
+    // initialize visited set
+    std::unordered_set<uint32_t> visited_set;
+
+    // seed with start node
+    uint32_t start_node_idx = this->start_;
+    const float *start_node_vec =
+        this->data_ + (start_node_idx * this->aligned_dim_);
+    float query_start_dist =
+        diskann::compare<float>(query, start_node_vec, this->aligned_dim_);
+    Candidate start_cand{start_node_idx, query_start_dist};
+    unexplored_front.push(start_cand);
+
+    // cached neighbor list
+    uint32_t nbrs_cache[128];
+    Candidate temp_cands[128];
+    uint32_t *nbrs = &nbrs_cache[0];
+    uint32_t MAX_ITERS = 20000, cur_iter = 0;
+
+    // start query search
+    while (unexplored_front.size() > 0 && cur_iter < MAX_ITERS) {
+      cur_iter++;
+      // pull closest vertex from unexplored front
+      Candidate top_unex = unexplored_front.pop_best();
+      uint32_t cur_node_id = top_unex.id;
+      float cur_node_dist = top_unex.dist;
+      // skip if already visited
+      if (visited_set.find(cur_node_id) != visited_set.end()) {
+        continue;
+      }
+
+      // read neighbors of candidate
+      uint32_t num_nbrs = 0;
+      this->Read(top_unex.id, nbrs, num_nbrs);
+      // std::cout << "[" << unexplored_front.size() << "]" << "Cur node : " <<
+      // cur_node_id << "," << cur_node_dist << << num_nbrs << std::endl;
+
+      // iterate over neighbors
+      for (uint32_t i = 0; i < num_nbrs; i++) {
+        // get neighbor ID
+        uint32_t nbr_id = nbrs[i];
+        // check if neighbor is in visited set
+        if (visited_set.find(nbr_id) != visited_set.end()) {
+          // skip neighbor
+          continue;
+        }
+        // get vec for the neighbor
+        const float *nbr_vec = this->data_ + (nbr_id * this->aligned_dim_);
+        // compute distance to query
+        float nbr_dist =
+            diskann::compare<float>(query, nbr_vec, this->aligned_dim_);
+        // check if `nbr_id` dist is worse than worst in explored front
+        if (explored_front.size() == k_NN) {
+          const Candidate &worst_ex = explored_front.worst();
+          if (nbr_dist >= worst_ex.dist) {
+            // skip `nbr_id` if worse than worst in explored front
+            continue;
+          }
+        }
+
+        // create candidate
+        Candidate nbr_cand{nbr_id, nbr_dist};
+        // add to unexplored front
+        unexplored_front.push(nbr_cand);
+        // std::cout << "Queueing: " << nbr_id << ", dist: " << nbr_dist <<
+        // std::endl;
+        // trim worst in unexplored front if needed
+        if (unexplored_front.size() > L_search) {
+          unexplored_front.pop_worst();
+        }
+      }
+
+      // add `top_unex` to explored front, truncate to best k_NN
+      explored_front.push(top_unex);
+      if (explored_front.size() > k_NN) {
+        explored_front.pop_worst();
+      }
+      // mark `top_unex` as visited
+      visited_set.insert(top_unex.id);
+    }
+
+    // copy results to output
+    // std::cout << "Final results:";
+    for (uint32_t i = 0; i < k_NN; i++) {
+      Candidate ith_NN = explored_front.pop_best();
+      knn_idxs[i] = ith_NN.id;
+      knn_dists[i] = ith_NN.dist;
+      // std::cout << "( " << ith_NN.id << ", " << ith_NN.dist << " ), ";
+    }
+    // std::cout << std::endl;
+    // std::cout << "Visited " << visited_set.size() << " nodes:";
+    // print all visited IDs
+    for (auto it = visited_set.begin(); it != visited_set.end(); it++) {
+      // std::cout << *it << ", ";
+    }
+    // std::cout << std::endl;
   }
 };
 } // namespace diskann
