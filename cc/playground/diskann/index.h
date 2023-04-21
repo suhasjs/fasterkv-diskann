@@ -94,9 +94,8 @@ public:
         new diskann::MemGraph(this->faster_max_keys_, this->faster_memory_size_,
                               this->faster_graph_path_);
     std::cout << "Created FASTER store for VamanaIndex" << std::endl;
-    std::cout << "Finished configuring index. Call load() to load graph into "
-                 "FASTER store."
-              << std::endl;
+    // std::cout << "Finished configuring index. Call load() to load graph into
+    // FASTER store. " << std::endl;
   }
 
   // separated load() to call StartSession() before upserting graph data
@@ -199,12 +198,7 @@ public:
   //       num_nbrs: number of neighbors (uint32_t)
   // Ensure `nbrs` has at least `num_nbrs` elements
   void Upsert(uint32_t node_id, uint32_t *nbrs, uint32_t num_nbrs) {
-    auto callback = [](IAsyncContext *ctxt, Status result) {
-      std::cout
-          << "Upsert completed for key: "
-          << reinterpret_cast<diskann::GraphUpsertContext *>(ctxt)->key().key
-          << std::endl;
-    };
+    auto callback = [](IAsyncContext *ctxt, Status result) {};
     // create upsert context
     diskann::GraphUpsertContext context{node_id, nbrs, num_nbrs};
     // upsert into store
@@ -224,12 +218,7 @@ public:
   // Ensure `nbrs` has space to write least `max_degree_` elements
   void Read(uint32_t node_id, uint32_t *nbrs, uint32_t &num_nbrs) {
     // std::cout << "Reading key:" << node_id << std::endl;
-    auto callback = [](IAsyncContext *ctxt, Status result) {
-      std::cout
-          << "Read completed for key: "
-          << reinterpret_cast<diskann::GraphReadContext *>(ctxt)->key().key
-          << std::endl;
-    };
+    auto callback = [](IAsyncContext *ctxt, Status result) {};
 
     // create read context
     diskann::GraphReadContext context{node_id, nbrs, &num_nbrs};
@@ -237,7 +226,8 @@ public:
     // read from store
     auto result = this->graph_->Read(context, callback, 1);
     if (result != Status::Ok) {
-      std::cout << "Read failed with status " << result << std::endl;
+      std::cout << "Read " << node_id << ", " << nbrs << ", " << num_nbrs
+                << " --> failed with status " << result << std::endl;
     }
 
     // std::cout << "Read " << num_nbrs << " neighbors for key " << node_id <<
@@ -278,6 +268,7 @@ public:
     query_stats->n_cmps++;
     beam_new_cands[0] = Candidate{start_node_idx, query_start_dist};
     unexplored_front.push_batch(beam_new_cands, 1);
+    visited_set.insert(start_node_idx);
 
     uint32_t MAX_ITERS = 1000, cur_iter = 0;
     // start query search
@@ -307,14 +298,6 @@ public:
         uint32_t cur_node_id = cand.id;
         float cur_node_dist = cand.dist;
 
-        // skip if already visited
-        if (visited_set.find(cur_node_id) != visited_set.end()) {
-          continue;
-        } else {
-          // add to visited set (don't revisit)
-          visited_set.insert(cur_node_id);
-        }
-
         // read neighbors of candidate
         uint32_t &num_nbrs = beam_nnbrs[cur_beam_size];
         this->Read(cand.id, beam_nbrs[cur_beam_size], num_nbrs);
@@ -335,6 +318,10 @@ public:
 
       // std::cout << "Iter: " << cur_iter << ", beam size: " << cur_beam_size
       // << std::endl;
+      for (uint32_t i = 0; i < cur_beam_size; i++) {
+        // std::cout << "cand: " << cur_beam[i].id << ", " << cur_beam[i].dist
+        // << std::endl;
+      }
 
       // number of viable new candidates generated
       beam_num_new_cands = 0;
@@ -373,6 +360,9 @@ public:
 
           // collect candidate for insertion
           beam_new_cands[beam_num_new_cands++] = Candidate{nbr_id, nbr_dist};
+
+          // mark visited
+          visited_set.insert(nbr_id);
         }
       }
 

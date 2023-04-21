@@ -106,10 +106,10 @@ int main(int argc, char *argv[]) {
   std::cout
       << "k, L, beamwidth, recall, latency, cmps, hops, ios, iobytes, iosize"
       << std::endl;
-  std::cout << k_NN << ", " << L_search << ", " << beam_width << ", " << recall
-            << ", " << avg(avg_stats.total_us) << ", " << avg(avg_stats.n_cmps)
-            << ", " << avg(avg_stats.n_hops) << ", " << avg(avg_stats.n_ios)
-            << ", " << avg(avg_stats.read_size) << ", "
+  std::cout << k_NN << ", " << L_search << ", " << beam_width << ", "
+            << recall * 100 << ", " << avg(avg_stats.total_us) << ", "
+            << avg(avg_stats.n_cmps) << ", " << avg(avg_stats.n_hops) << ", "
+            << avg(avg_stats.n_ios) << ", " << avg(avg_stats.read_size) << ", "
             << avg_stats.read_size / avg_stats.n_ios << std::endl;
 
   // stop session

@@ -26,7 +26,7 @@ template <>
 inline float compare<float>(const float *a, const float *b,
                             const uint32_t dim) {
   float dist = 0.0f;
-#pragma omp simd reduction(+ : dist)
+#pragma omp simd reduction(+ : dist) aligned(a, b : 32)
   for (uint32_t i = 0; i < dim; i++) {
     float diff = a[i] - b[i];
     dist += diff * diff;

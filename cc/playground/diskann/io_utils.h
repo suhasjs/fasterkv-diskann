@@ -36,8 +36,8 @@ inline void get_bin_metadata(const std::string &filename, uint32_t &npts,
   npts = (unsigned)npts_i32;
   dim = (unsigned)dim_i32;
 
-  std::cout << "Binary metadata (" << filename << "): npts = " << npts
-            << ", dim = " << dim << std::endl;
+  // std::cout << "Binary metadata (" << filename << "): npts = " << npts << ",
+  // dim = " << dim << std::endl;
 
   reader.close();
 }
@@ -64,8 +64,8 @@ inline void get_graph_metadata(const std::string &filename, size_t &filesize,
   reader.read((char *)&start_id, sizeof(uint32_t));
   // skip number of frozen points
 
-  std::cout << "Graph metadata (" << filename << "): filesize = " << filesize
-            << ", start_id = " << start_id << std::endl;
+  // std::cout << "Graph metadata (" << filename << "): filesize = " << filesize
+  // << ", start_id = " << start_id << std::endl;
 
   reader.close();
 }
@@ -85,7 +85,7 @@ inline void populate_from_bin(T *data, const std::string &filename,
   assert(data != nullptr);
   int npts_i32, dim_i32;
   std::ifstream reader;
-  std::cout << "Reading file: " << filename << "..." << std::endl;
+  // std::cout << "Reading file: " << filename << "..." << std::endl;
   reader.open(filename, std::ios::in | std::ios::binary);
   // read metadata for #pts and #dims
   reader.read((char *)&npts_i32, sizeof(int));
@@ -104,8 +104,8 @@ inline void populate_from_bin(T *data, const std::string &filename,
       reader.read((char *)(data + i * read_dim), dim * sizeof(T));
     }
   }
-  std::cout << "Finished reading npts: " << npts << ", dim: " << dim
-            << " from file: " << filename << std::endl;
+  // std::cout << "Finished reading npts: " << npts << ", dim: " << dim << "
+  // from file: " << filename << std::endl;
   reader.close();
 }
 
