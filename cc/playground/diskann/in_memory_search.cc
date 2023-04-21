@@ -7,6 +7,7 @@
 
 #include "../src/core/faster.h"
 #include "index.h"
+#include <omp.h>
 
 using namespace FASTER::core;
 
@@ -22,10 +23,10 @@ uint64_t get_p99_latency(diskann::QueryStats *stats, uint32_t num_queries) {
 
 int main(int argc, char *argv[]) {
   // assume float data type for now
-  if (argc < 9) {
+  if (argc < 10) {
     std::cout << "Usage (only float vectors supported): " << argv[0]
               << " <index_prefix> <num_pts> <dim> <query_bin> <gt_bin> <k> <L> "
-                 "<beam_width>"
+                 "<beam_width> <num_threads>"
               << std::endl;
     exit(0);
   }
@@ -39,6 +40,7 @@ int main(int argc, char *argv[]) {
   uint32_t k_NN = std::stoi(argv[6]);
   uint32_t L_search = std::stoi(argv[7]);
   uint32_t beam_width = std::stoi(argv[8]);
+  uint32_t num_threads = std::stoi(argv[9]);
 
   // create index
   diskann::FasterVamanaIndex index(num_pts, dim, index_prefix);
@@ -48,6 +50,8 @@ int main(int argc, char *argv[]) {
   // load index
   std::cout << "Loading index " << std::endl;
   index.load();
+
+  uint64_t max_degree = index.get_max_degree();
 
   // load query data
   uint32_t num_queries, query_dim = dim;
@@ -77,6 +81,13 @@ int main(int argc, char *argv[]) {
   float *result_dist = new float[k_NN * num_queries];
   diskann::QueryStats *result_stats = new diskann::QueryStats[num_queries];
 
+  // setup query contexts
+  std::vector<diskann::QueryContext *> query_contexts;
+  for (uint32_t i = 0; i < num_threads; i++) {
+    query_contexts.emplace_back(
+        new diskann::QueryContext(beam_width, max_degree, L_search));
+  }
+
   // times `func` on `args` and returns the time in microseconds
   // credit: https://stackoverflow.com/a/53498501
   auto time_query_us = [&index](auto &&... params) {
@@ -92,7 +103,11 @@ int main(int argc, char *argv[]) {
   };
 
   // run search (sequential)
+  const auto start_t = std::chrono::high_resolution_clock::now();
+#pragma omp parallel for num_threads(num_threads) schedule(dynamic, 1)
   for (uint32_t i = 0; i < num_queries; i++) {
+    uint32_t thread_num = omp_get_thread_num();
+    query_contexts[thread_num]->reset();
     // inputs to search
     float *cur_query = query_data + i * aligned_dim;
     uint32_t *cur_result = result + i * k_NN;
@@ -100,9 +115,15 @@ int main(int argc, char *argv[]) {
     // perform search
     uint64_t cur_query_time =
         time_query_us(cur_query, k_NN, L_search, cur_result, cur_result_dist,
-                      result_stats + i, beam_width);
+                      result_stats + i, beam_width, query_contexts[thread_num]);
     result_stats[i].total_us = cur_query_time;
   }
+  const auto stop_t = std::chrono::high_resolution_clock::now();
+  double time_seconds =
+      std::chrono::duration_cast<std::chrono::microseconds>(stop_t - start_t)
+          .count() *
+      1.0 / 1e6;
+  double qps = num_queries / time_seconds;
 
   // compute recall
   float recall =
@@ -113,11 +134,13 @@ int main(int argc, char *argv[]) {
   avg_stats =
       std::accumulate(result_stats + 1, result_stats + num_queries, avg_stats);
   auto avg = [&num_queries](uint64_t val) { return val / (float)num_queries; };
-  std::cout << "k, L, beamwidth, recall, latency, p99_latecy, cmps, hops, ios, "
-               "iobytes, iosize"
-            << std::endl;
-  std::cout << k_NN << ", " << L_search << ", " << beam_width << ", "
-            << recall * 100 << ", " << avg(avg_stats.total_us) << ", "
+  std::cout
+      << "threads, k, L, beamwidth, qps, recall, latency, p99_latecy, cmps, "
+         "hops, ios, iobytes, iosize"
+      << std::endl;
+  std::cout << num_threads << ", " << k_NN << ", " << L_search << ", "
+            << beam_width << ", " << qps << ", " << recall * 100 << ", "
+            << avg(avg_stats.total_us) << ", "
             << get_p99_latency(result_stats, num_queries) << ", "
             << avg(avg_stats.n_cmps) << ", " << avg(avg_stats.n_hops) << ", "
             << avg(avg_stats.n_ios) << ", " << avg(avg_stats.read_size) << ", "
@@ -132,6 +155,9 @@ int main(int argc, char *argv[]) {
   delete[] result;
   delete[] result_dist;
   delete[] result_stats;
+  for (auto &ctx : query_contexts) {
+    delete ctx;
+  }
 
   return 0;
 }
