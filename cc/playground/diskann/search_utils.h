@@ -72,39 +72,59 @@ inline bool further_is_better(const Candidate &a, const Candidate &b) {
 template <bool (*compare)(const Candidate &, const Candidate &)>
 class FastCandidatePQ {
 public:
-  FastCandidatePQ() : _size(0) {}
+  FastCandidatePQ(uint32_t max_size) : _size(0), _max_size(max_size) {
+    assert(max_size < PQ_DEFAULT_SIZE);
+    _array = _array1;
+    _use_default = true;
+  }
 
-  // insert a candidate into the array, sort the array
-  void push(const Candidate &c) {
-    if (_size < PQ_DEFAULT_SIZE) {
-      _array[_size++] = c;
-      std::sort(_array, _array + _size, compare);
-    } else {
-      if (compare(c, _array[_size - 1])) {
-        _array[_size - 1] = c;
-        std::sort(_array, _array + _size, compare);
+  // step1: sort `c`
+  // step2: truncated-merge `c` with _array
+  // only keep the best `max_size` candidates
+  void push_batch(Candidate *c, uint32_t n) {
+    // sort incoming array
+    std::sort(c, c + n, compare);
+    Candidate *_dest_array = _flip_array();
+    uint32_t i = 0, j = 0, k = 0;
+    while (i < n && j < _size && k < _max_size) {
+      if (compare(c[i], _array[j])) {
+        _dest_array[k++] = c[i++];
+      } else {
+        _dest_array[k++] = _array[j++];
       }
     }
+    while (i < n && k < _max_size) {
+      _dest_array[k++] = c[i++];
+    }
+    while (j < _size && k < _max_size) {
+      _dest_array[k++] = _array[j++];
+    }
+    _size = k;
+    _array = _dest_array;
   }
 
-  // pop the worst candidate, return a copy of the popped candidate
-  Candidate pop_worst() {
-    if (_size > 0) {
-      return _array[--_size];
+  // trim the array to best n
+  void trim(uint32_t n) {
+    if (_size > n) {
+      _size = n;
     }
-    return Candidate();
   }
 
-  // pop the best candidate, return a copy of the popped candidate
-  Candidate pop_best() {
-    if (_size > 0) {
-      Candidate c = _array[0];
-      _array[0] = _array[--_size];
-      std::sort(_array, _array + _size, compare);
-      return c;
+  // copy the best n candidates into the out_arr
+  // remove them from the array
+  void pop_best_n(uint32_t n) {
+    if (_size < n) {
+      n = _size;
     }
-    return Candidate();
+    Candidate *_dest_array = _flip_array();
+    std::copy(_array, _array + n, _dest_array);
+    _size -= n;
+    _array = _dest_array;
   }
+
+  // iterator to iterate over the array
+  Candidate *begin() { return _array; }
+  Candidate *end() { return _array + _size; }
 
   // return the current size of the candidate list
   uint32_t size() const { return _size; }
@@ -116,8 +136,22 @@ public:
   const Candidate &worst() const { return _array[_size - 1]; }
 
 private:
-  Candidate _array[PQ_DEFAULT_SIZE];
+  Candidate *_flip_array() {
+    if (_use_default) {
+      _use_default = false;
+      return _array1;
+    } else {
+      _use_default = true;
+      return _array2;
+    }
+  }
+  // 2 arrays to store the candidates
+  Candidate *_array = nullptr;
+  bool _use_default = true;
+  Candidate _array1[PQ_DEFAULT_SIZE];
+  Candidate _array2[PQ_DEFAULT_SIZE];
   uint32_t _size;
+  uint32_t _max_size;
 };
 
 // specializations of FastCandidatePQ for closer/further comparators

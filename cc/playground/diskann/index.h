@@ -251,23 +251,15 @@ public:
               uint32_t *knn_idxs, float *knn_dists, QueryStats *query_stats,
               uint32_t beam_width = 4) {
     // initialize priority queue of neighbors
-    CloserPQ unexplored_front, explored_front;
+    CloserPQ unexplored_front{L_search}, explored_front{L_search};
 
     // initialize visited set
     std::unordered_set<uint32_t> visited_set;
 
-    // seed with start node
-    uint32_t start_node_idx = this->start_;
-    const float *start_node_vec =
-        this->data_ + (start_node_idx * this->aligned_dim_);
-    float query_start_dist =
-        diskann::compare<float>(query, start_node_vec, this->aligned_dim_);
-    query_stats->n_cmps++;
-    Candidate start_cand{start_node_idx, query_start_dist};
-    unexplored_front.push(start_cand);
-
     // cached neighbor list
     Candidate cur_beam[MAX_BEAM_WIDTH];
+    Candidate beam_new_cands[256];
+    uint32_t beam_num_new_cands = 0;
     uint32_t beam_nbrs_cache[MAX_BEAM_WIDTH * MAX_VAMANA_DEGREE];
     uint32_t cur_beam_size = 0;
     uint32_t *beam_nbrs[MAX_BEAM_WIDTH];
@@ -276,21 +268,42 @@ public:
     for (uint32_t i = 0; i < MAX_BEAM_WIDTH; i++) {
       beam_nbrs[i] = &(beam_nbrs_cache[i * MAX_VAMANA_DEGREE]);
     }
-    uint32_t MAX_ITERS = 20000, cur_iter = 0;
 
+    // seed `unexplored_front` with start node
+    uint32_t start_node_idx = this->start_;
+    const float *start_node_vec =
+        this->data_ + (start_node_idx * this->aligned_dim_);
+    float query_start_dist =
+        diskann::compare<float>(query, start_node_vec, this->aligned_dim_);
+    query_stats->n_cmps++;
+    beam_new_cands[0] = Candidate{start_node_idx, query_start_dist};
+    unexplored_front.push_batch(beam_new_cands, 1);
+
+    uint32_t MAX_ITERS = 20000, cur_iter = 0;
     // start query search
     while (unexplored_front.size() > 0 && cur_iter < MAX_ITERS) {
       // reset iter variables
       cur_iter++;
       cur_beam_size = 0;
 
+      // test early convergence of greedy search: top unexplored is worse than
+      // worst explored
+      if (explored_front.size() > 0) {
+        if (unexplored_front.best().dist > explored_front.worst().dist)
+          break;
+      }
+
       // populate `beam_width` closest candidates from unexplored front
-      while (unexplored_front.size() > 0 && cur_beam_size < beam_width) {
+      uint32_t pop_count = 0;
+      for (const auto &cand : unexplored_front) {
+        if (cur_beam_size >= beam_width)
+          break;
+        // record as popped
+        pop_count++;
         // get current closest
-        cur_beam[cur_beam_size] = unexplored_front.pop_best();
-        const Candidate &top_unex = cur_beam[cur_beam_size];
-        uint32_t cur_node_id = top_unex.id;
-        float cur_node_dist = top_unex.dist;
+        cur_beam[cur_beam_size] = cand;
+        uint32_t cur_node_id = cand.id;
+        float cur_node_dist = cand.dist;
 
         // skip if already visited
         if (visited_set.find(cur_node_id) != visited_set.end()) {
@@ -302,22 +315,28 @@ public:
 
         // read neighbors of candidate
         uint32_t &num_nbrs = beam_nnbrs[cur_beam_size];
-        this->Read(top_unex.id, beam_nbrs[cur_beam_size], num_nbrs);
+        this->Read(cand.id, beam_nbrs[cur_beam_size], num_nbrs);
         // record IO stats
         query_stats->n_ios++;
         query_stats->read_size +=
             ((num_nbrs) * sizeof(uint32_t) + sizeof(diskann::FlexibleValue));
         assert(num_nbrs <= MAX_VAMANA_DEGREE);
-        // std::cout << "[" << cur_beam_size << "]"<< "Cur node : " <<
-        // cur_node_id << "," << cur_node_dist << ", " << num_nbrs << std::endl;
+        std::cout << "[" << cur_beam_size << "]"
+                  << "Cur node : " << cur_node_id << "," << cur_node_dist
+                  << ", " << num_nbrs << std::endl;
 
         // increment beam size
         cur_beam_size++;
       }
 
-      // std::cout << "Iter: " << cur_iter << ", beam size: " << cur_beam_size
-      // << std::endl;
+      // pop number of considered candidates
+      unexplored_front.pop_best_n(pop_count);
 
+      std::cout << "Iter: " << cur_iter << ", beam size: " << cur_beam_size
+                << std::endl;
+
+      // number of viable new candidates generated
+      beam_num_new_cands = 0;
       // iterate over neighbors for each candidate
       for (uint32_t i = 0; i < cur_beam_size; i++) {
         // get candidate
@@ -341,7 +360,7 @@ public:
               diskann::compare<float>(query, nbr_vec, this->aligned_dim_);
           query_stats->n_cmps++;
           // check if `nbr_id` dist is worse than worst in explored front
-          if (explored_front.size() == k_NN) {
+          if (explored_front.size() > L_search) {
             const Candidate &worst_ex = explored_front.worst();
             if (nbr_dist >= worst_ex.dist) {
               // skip `nbr_id` if worse than worst in explored front
@@ -349,25 +368,22 @@ public:
             }
           }
 
-          // create candidate
-          Candidate nbr_cand{nbr_id, nbr_dist};
-          // add to unexplored front
-          unexplored_front.push(nbr_cand);
-          // std::cout << "Queueing: " << nbr_id << ", dist: " << nbr_dist <<
-          // std::endl; trim worst in unexplored front if needed
-          if (unexplored_front.size() > L_search) {
-            unexplored_front.pop_worst();
-          }
+          // collect candidate for insertion
+          beam_new_cands[beam_num_new_cands++] = Candidate{nbr_id, nbr_dist};
         }
       }
 
-      // add `top_unex` to explored front, truncate to best k_NN
-      for (uint32_t i = 0; i < cur_beam_size; i++) {
-        explored_front.push(cur_beam[i]);
-        if (explored_front.size() > k_NN) {
-          explored_front.pop_worst();
-        }
+      // insert all collected candidates into unexplored front
+      unexplored_front.push_batch(beam_new_cands, beam_num_new_cands);
+      for (uint32_t i = 0; i < beam_num_new_cands; i++) {
+        std::cout << "Queueing: " << beam_new_cands[i].id
+                  << ", dist: " << beam_new_cands[i].dist << std::endl;
       }
+      unexplored_front.trim(L_search);
+
+      // add `beam` to explored front, truncate to best L_search
+      explored_front.push_batch(cur_beam, cur_beam_size);
+      explored_front.trim(L_search);
     }
 
     // record num iters
@@ -375,8 +391,8 @@ public:
 
     // copy results to output
     // std::cout << "Final results:";
-    for (uint32_t i = 0; i < k_NN; i++) {
-      Candidate ith_NN = explored_front.pop_best();
+    uint32_t i = 0;
+    for (const auto &ith_NN : explored_front) {
       knn_idxs[i] = ith_NN.id;
       knn_dists[i] = ith_NN.dist;
       // std::cout << "( " << ith_NN.id << ", " << ith_NN.dist << " ), ";
