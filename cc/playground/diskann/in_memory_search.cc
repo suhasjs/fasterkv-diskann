@@ -10,6 +10,16 @@
 
 using namespace FASTER::core;
 
+uint64_t get_p99_latency(diskann::QueryStats *stats, uint32_t num_queries) {
+  std::vector<uint64_t> latencies(num_queries);
+  for (uint32_t i = 0; i < num_queries; i++) {
+    latencies[i] = stats[i].total_us;
+  }
+  std::sort(latencies.begin(), latencies.end());
+  uint64_t p99_idx = (uint64_t)(num_queries * 0.99);
+  return latencies[p99_idx];
+}
+
 int main(int argc, char *argv[]) {
   // assume float data type for now
   if (argc < 9) {
@@ -103,11 +113,12 @@ int main(int argc, char *argv[]) {
   avg_stats =
       std::accumulate(result_stats + 1, result_stats + num_queries, avg_stats);
   auto avg = [&num_queries](uint64_t val) { return val / (float)num_queries; };
-  std::cout
-      << "k, L, beamwidth, recall, latency, cmps, hops, ios, iobytes, iosize"
-      << std::endl;
+  std::cout << "k, L, beamwidth, recall, latency, p99_latecy, cmps, hops, ios, "
+               "iobytes, iosize"
+            << std::endl;
   std::cout << k_NN << ", " << L_search << ", " << beam_width << ", "
             << recall * 100 << ", " << avg(avg_stats.total_us) << ", "
+            << get_p99_latency(result_stats, num_queries) << ", "
             << avg(avg_stats.n_cmps) << ", " << avg(avg_stats.n_hops) << ", "
             << avg(avg_stats.n_ios) << ", " << avg(avg_stats.read_size) << ", "
             << avg_stats.read_size / avg_stats.n_ios << std::endl;
