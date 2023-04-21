@@ -82,7 +82,6 @@ int main(int argc, char *argv[]) {
   };
 
   // run search (sequential)
-  num_queries = 1;
   for (uint32_t i = 0; i < num_queries; i++) {
     // inputs to search
     float *cur_query = query_data + i * aligned_dim;

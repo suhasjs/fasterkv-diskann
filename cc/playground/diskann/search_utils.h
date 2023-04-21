@@ -86,6 +86,7 @@ public:
     std::sort(c, c + n, compare);
     Candidate *_dest_array = _flip_array();
     uint32_t i = 0, j = 0, k = 0;
+    // merge `c` and _array
     while (i < n && j < _size && k < _max_size) {
       if (compare(c[i], _array[j])) {
         _dest_array[k++] = c[i++];
@@ -93,9 +94,11 @@ public:
         _dest_array[k++] = _array[j++];
       }
     }
+    // copy remaining elements from `c`
     while (i < n && k < _max_size) {
       _dest_array[k++] = c[i++];
     }
+    // copy remaining elements from _array
     while (j < _size && k < _max_size) {
       _dest_array[k++] = _array[j++];
     }
@@ -117,14 +120,13 @@ public:
       n = _size;
     }
     Candidate *_dest_array = _flip_array();
-    std::copy(_array, _array + n, _dest_array);
+    std::copy(_array + n, _array + n + _size, _dest_array);
     _size -= n;
     _array = _dest_array;
   }
 
-  // iterator to iterate over the array
-  Candidate *begin() { return _array; }
-  Candidate *end() { return _array + _size; }
+  // const read ptr
+  const Candidate *data() const { return _array; }
 
   // return the current size of the candidate list
   uint32_t size() const { return _size; }
@@ -139,10 +141,10 @@ private:
   Candidate *_flip_array() {
     if (_use_default) {
       _use_default = false;
-      return _array1;
+      return _array2;
     } else {
       _use_default = true;
-      return _array2;
+      return _array1;
     }
   }
   // 2 arrays to store the candidates
