@@ -3,9 +3,11 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <queue>
 #include <unordered_set>
+#include <utility>
 
 #define PQ_DEFAULT_SIZE 256
 
@@ -142,4 +144,58 @@ float compute_recall(uint32_t *gt, uint32_t *result, uint32_t gt_NN,
   return recall / (float)num_queries;
 }
 
+// stats per query
+struct QueryStats {
+  uint64_t total_us = 0; // total time to process query in micros
+  uint64_t io_us = 0;    // total time spent in IO
+  uint64_t cpu_us = 0;   // total time spent in CPU
+
+  uint64_t n_ios = 0;     // total # of IOs issued
+  uint64_t read_size = 0; // total # of bytes read
+  uint64_t n_cmps = 0;    // # dist cmps
+  uint64_t n_hops = 0;    // # search iters
+
+  // operator overloads
+  QueryStats &operator+=(const QueryStats &rhs) {
+    total_us += rhs.total_us;
+    io_us += rhs.io_us;
+    cpu_us += rhs.cpu_us;
+    n_ios += rhs.n_ios;
+    read_size += rhs.read_size;
+    n_cmps += rhs.n_cmps;
+    n_hops += rhs.n_hops;
+    return *this;
+  }
+  QueryStats operator+(const QueryStats &rhs) const {
+    QueryStats tmp(*this);
+    tmp += rhs;
+    return tmp;
+  }
+  QueryStats &operator/=(const float &rhs) {
+    total_us /= rhs;
+    io_us /= rhs;
+    cpu_us /= rhs;
+    n_ios /= rhs;
+    read_size /= rhs;
+    n_cmps /= rhs;
+    n_hops /= rhs;
+    return *this;
+  }
+  QueryStats operator/(const float &rhs) const {
+    QueryStats tmp(*this);
+    tmp /= rhs;
+    return tmp;
+  }
+  // overload = operator
+  QueryStats &operator=(const QueryStats &rhs) {
+    total_us = rhs.total_us;
+    io_us = rhs.io_us;
+    cpu_us = rhs.cpu_us;
+    n_ios = rhs.n_ios;
+    read_size = rhs.read_size;
+    n_cmps = rhs.n_cmps;
+    n_hops = rhs.n_hops;
+    return *this;
+  }
+};
 } // namespace diskann

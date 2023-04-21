@@ -12,9 +12,10 @@ using namespace FASTER::core;
 
 int main(int argc, char *argv[]) {
   // assume float data type for now
-  if (argc < 8) {
+  if (argc < 9) {
     std::cout << "Usage (only float vectors supported): " << argv[0]
-              << " <index_prefix> <num_pts> <dim> <query_bin> <gt_bin> <k> <L>"
+              << " <index_prefix> <num_pts> <dim> <query_bin> <gt_bin> <k> <L> "
+                 "<beam_width>"
               << std::endl;
     exit(0);
   }
@@ -27,13 +28,12 @@ int main(int argc, char *argv[]) {
   std::string gt_bin = argv[5];
   uint32_t k_NN = std::stoi(argv[6]);
   uint32_t L_search = std::stoi(argv[7]);
+  uint32_t beam_width = std::stoi(argv[8]);
 
   // create index
-  std::cout << "Creating FasterVamanaIndex with FASTER NullDisk " << std::endl;
   diskann::FasterVamanaIndex index(num_pts, dim, index_prefix);
   // start a session (akin to FASTER KV::StartSession)
   index.StartSession();
-  std::cout << "Started session " << std::endl;
 
   // load index
   std::cout << "Loading index " << std::endl;
@@ -65,6 +65,21 @@ int main(int argc, char *argv[]) {
   // create output bufer
   uint32_t *result = new uint32_t[k_NN * num_queries];
   float *result_dist = new float[k_NN * num_queries];
+  diskann::QueryStats *result_stats = new diskann::QueryStats[num_queries];
+
+  // times `func` on `args` and returns the time in microseconds
+  // credit: https://stackoverflow.com/a/53498501
+  auto time_query_us = [&index](auto &&... params) {
+    // get time before function invocation
+    const auto &start = std::chrono::high_resolution_clock::now();
+    // function invocation using perfect forwarding
+    index.search(std::forward<decltype(params)>(params)...);
+    // get time after function invocation
+    const auto &stop = std::chrono::high_resolution_clock::now();
+    // return time difference in microseconds
+    return std::chrono::duration_cast<std::chrono::microseconds>(stop - start)
+        .count();
+  };
 
   // run search (sequential)
   for (uint32_t i = 0; i < num_queries; i++) {
@@ -73,24 +88,39 @@ int main(int argc, char *argv[]) {
     uint32_t *cur_result = result + i * k_NN;
     float *cur_result_dist = result_dist + i * k_NN;
     // perform search
-    index.search(cur_query, k_NN, L_search, cur_result, cur_result_dist);
+    uint64_t cur_query_time =
+        time_query_us(cur_query, k_NN, L_search, cur_result, cur_result_dist,
+                      result_stats + i, beam_width);
+    result_stats[i].total_us = cur_query_time;
   }
 
   // compute recall
   float recall =
       diskann::compute_recall(gt_data, result, gk_kNN, k_NN, num_queries);
-  std::cout << "Recall: " << recall << std::endl;
+
+  // compute avg stats
+  diskann::QueryStats avg_stats = result_stats[0];
+  avg_stats =
+      std::accumulate(result_stats + 1, result_stats + num_queries, avg_stats);
+  auto avg = [&num_queries](uint64_t val) { return val / (float)num_queries; };
+  std::cout
+      << "k, L, beamwidth, recall, latency, cmps, hops, ios, iobytes, iosize"
+      << std::endl;
+  std::cout << k_NN << ", " << L_search << ", " << beam_width << ", " << recall
+            << ", " << avg(avg_stats.total_us) << ", " << avg(avg_stats.n_cmps)
+            << ", " << avg(avg_stats.n_hops) << ", " << avg(avg_stats.n_ios)
+            << ", " << avg(avg_stats.read_size) << ", "
+            << avg_stats.read_size / avg_stats.n_ios << std::endl;
 
   // stop session
   index.StopSession();
-  std::cout << "Stopped session " << std::endl;
 
   // free any alloc'ed resources
   free(query_data);
   delete[] gt_data;
   delete[] result;
   delete[] result_dist;
+  delete[] result_stats;
 
-  std::cout << "Exiting" << std::endl;
   return 0;
 }
