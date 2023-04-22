@@ -202,9 +202,11 @@ float compute_recall(uint32_t *gt, uint32_t *result, uint32_t gt_NN,
 
 // stats per query
 struct QueryStats {
-  uint64_t total_us = 0; // total time to process query in micros
-  uint64_t io_us = 0;    // total time spent in IO
-  uint64_t cpu_us = 0;   // total time spent in CPU
+  uint64_t total_us = 0;  // total time to process query in micros
+  uint64_t io_us = 0;     // time spent on IO in micros
+  uint64_t cpu_us = 0;    // time spent on CPU in micros
+  uint64_t io_ticks = 0;  // number of CPU ticks spent on IO
+  uint64_t cpu_ticks = 0; // total number of CPU ticks
 
   uint64_t n_ios = 0;     // total # of IOs issued
   uint64_t read_size = 0; // total # of bytes read
@@ -216,6 +218,8 @@ struct QueryStats {
     total_us += rhs.total_us;
     io_us += rhs.io_us;
     cpu_us += rhs.cpu_us;
+    io_ticks += rhs.io_ticks;
+    cpu_ticks += rhs.cpu_ticks;
     n_ios += rhs.n_ios;
     read_size += rhs.read_size;
     n_cmps += rhs.n_cmps;
@@ -231,6 +235,8 @@ struct QueryStats {
     total_us /= rhs;
     io_us /= rhs;
     cpu_us /= rhs;
+    io_ticks /= rhs;
+    cpu_ticks /= rhs;
     n_ios /= rhs;
     read_size /= rhs;
     n_cmps /= rhs;
@@ -247,6 +253,8 @@ struct QueryStats {
     total_us = rhs.total_us;
     io_us = rhs.io_us;
     cpu_us = rhs.cpu_us;
+    io_ticks = rhs.io_ticks;
+    cpu_ticks = rhs.cpu_ticks;
     n_ios = rhs.n_ios;
     read_size = rhs.read_size;
     n_cmps = rhs.n_cmps;
@@ -288,13 +296,13 @@ struct QueryContext {
     buf_size += front_alloc_size; // unexplored_front, 2x arrays internally
     buf_size += front_alloc_size; // explored_front, 2x arrays internally
 
-    // round up to 256 bytes
+    // round up: 256 byte alignment
     buf_size = ROUND_UP(buf_size, 256);
 
     // alloc aligned buffer to buf
     this->buf = (uint8_t *)FASTER::core::aligned_alloc(256, buf_size);
-    std::cout << "Allocating QueryContext: alloc " << buf_size << " B"
-              << std::endl;
+    // std::cout << "Allocating QueryContext: alloc " << buf_size << " B" <<
+    // std::endl;
 
     // set pointers within buf
     uint64_t offset = 0;
@@ -321,7 +329,7 @@ struct QueryContext {
     explored_front =
         CloserPQ::create_from_array(buf + offset, L_search, alloc_L_search);
     offset += front_alloc_size;
-    std::cout << "QueryContext: offset=" << offset << std::endl;
+    // std::cout << "QueryContext: offset=" << offset << std::endl;
     // sanity check
     assert(ROUND_UP(offset, 256) == buf_size);
 
@@ -341,8 +349,8 @@ struct QueryContext {
 
   ~QueryContext() {
     if (buf != nullptr) {
-      std::cout << "Freeing QueryContext: released " << buf_size << " B"
-                << std::endl;
+      // std::cout << "Freeing QueryContext: released " << buf_size << " B" <<
+      // std::endl;
       FASTER::core::aligned_free(buf);
     }
   }

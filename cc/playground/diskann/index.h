@@ -272,6 +272,7 @@ public:
     visited_set.insert(start_node_idx);
 
     uint32_t MAX_ITERS = 1000, cur_iter = 0;
+    query_stats->io_ticks = 0;
     // start query search
     while (unexplored_front->size() > 0 && cur_iter < MAX_ITERS) {
       // reset iter variables
@@ -301,7 +302,12 @@ public:
 
         // read neighbors of candidate
         uint32_t &num_nbrs = beam_nnbrs[cur_beam_size];
-        this->Read(cand.id, beam_nbrs[cur_beam_size], num_nbrs);
+        // time IO
+        {
+          uint64_t start_tsc = __builtin_ia32_rdtsc();
+          this->Read(cand.id, beam_nbrs[cur_beam_size], num_nbrs);
+          query_stats->io_ticks += (__builtin_ia32_rdtsc() - start_tsc);
+        }
         // record IO stats
         query_stats->n_ios++;
         query_stats->read_size +=

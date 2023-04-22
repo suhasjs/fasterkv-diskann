@@ -107,6 +107,7 @@ int main(int argc, char *argv[]) {
 #pragma omp parallel for num_threads(num_threads) schedule(dynamic, 1)
   for (uint32_t i = 0; i < num_queries; i++) {
     uint32_t thread_num = omp_get_thread_num();
+    uint64_t start_tsc = __builtin_ia32_rdtsc();
     query_contexts[thread_num]->reset();
     // inputs to search
     float *cur_query = query_data + i * aligned_dim;
@@ -116,6 +117,8 @@ int main(int argc, char *argv[]) {
     uint64_t cur_query_time =
         time_query_us(cur_query, k_NN, L_search, cur_result, cur_result_dist,
                       result_stats + i, beam_width, query_contexts[thread_num]);
+    uint64_t end_tsc = __builtin_ia32_rdtsc();
+    result_stats[i].cpu_ticks = end_tsc - start_tsc;
     result_stats[i].total_us = cur_query_time;
   }
   const auto stop_t = std::chrono::high_resolution_clock::now();
@@ -136,7 +139,7 @@ int main(int argc, char *argv[]) {
   auto avg = [&num_queries](uint64_t val) { return val / (float)num_queries; };
   std::cout
       << "threads, k, L, beamwidth, qps, recall, latency, p99_latecy, cmps, "
-         "hops, ios, iobytes, iosize"
+         "hops, ios, iobytes, iosize, ioticks, cputicks"
       << std::endl;
   std::cout << num_threads << ", " << k_NN << ", " << L_search << ", "
             << beam_width << ", " << qps << ", " << recall * 100 << ", "
@@ -144,7 +147,9 @@ int main(int argc, char *argv[]) {
             << get_p99_latency(result_stats, num_queries) << ", "
             << avg(avg_stats.n_cmps) << ", " << avg(avg_stats.n_hops) << ", "
             << avg(avg_stats.n_ios) << ", " << avg(avg_stats.read_size) << ", "
-            << avg_stats.read_size / avg_stats.n_ios << std::endl;
+            << avg_stats.read_size / avg_stats.n_ios << ", "
+            << avg(avg_stats.io_ticks) << ", "
+            << (uint64_t)avg(avg_stats.cpu_ticks) << std::endl;
 
   // stop session
   index.StopSession();
