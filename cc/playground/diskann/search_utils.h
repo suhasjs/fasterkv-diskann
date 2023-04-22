@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <immintrin.h>
 #include <queue>
 #include <unordered_set>
 #include <utility>
@@ -101,6 +102,10 @@ public:
     // sort incoming array
     std::sort(c, c + n, compare);
     Candidate *_dest_array = _flip_array();
+    // prefetch the destination array
+    _mm_prefetch((const char *)_dest_array, _MM_HINT_T0);
+    _mm_prefetch((const char *)_array, _MM_HINT_T0);
+    _mm_prefetch((const char *)c, _MM_HINT_T0);
     uint32_t i = 0, j = 0, k = 0;
     // merge `c` and _array
     while (i < n && j < _size && k < _max_size) {

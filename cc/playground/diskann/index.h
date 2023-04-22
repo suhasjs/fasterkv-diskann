@@ -13,6 +13,8 @@
 #include "graph.h"
 #include "io_utils.h"
 #include "search_utils.h"
+#include <mmintrin.h>
+#include <xmmintrin.h>
 
 #include "../src/core/faster.h"
 
@@ -264,6 +266,8 @@ public:
     uint32_t start_node_idx = this->start_;
     const float *start_node_vec =
         this->data_ + (start_node_idx * this->aligned_dim_);
+    // prefetch start node vector
+    _mm_prefetch((const char *)start_node_vec, _MM_HINT_NTA);
     float query_start_dist =
         diskann::compare<float>(query, start_node_vec, this->aligned_dim_);
     query_stats->n_cmps++;
@@ -307,6 +311,7 @@ public:
           uint64_t start_tsc = __builtin_ia32_rdtsc();
           this->Read(cand.id, beam_nbrs[cur_beam_size], num_nbrs);
           query_stats->io_ticks += (__builtin_ia32_rdtsc() - start_tsc);
+          _mm_prefetch((const char *)beam_nbrs[cur_beam_size], _MM_HINT_T0);
         }
         // record IO stats
         query_stats->n_ios++;
@@ -350,6 +355,8 @@ public:
           }
           // get vec for the neighbor
           const float *nbr_vec = this->data_ + (nbr_id * this->aligned_dim_);
+          // prefetch neighbor vector
+          _mm_prefetch((const char *)nbr_vec, _MM_HINT_NTA);
           // compute distance to query
           float nbr_dist =
               diskann::compare<float>(query, nbr_vec, this->aligned_dim_);
