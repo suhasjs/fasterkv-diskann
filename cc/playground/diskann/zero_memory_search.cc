@@ -6,7 +6,7 @@
 #include <string>
 
 #include "../src/core/faster.h"
-#include "faster_vamana.h"
+#include "faster_diskann_zero.h"
 #include <omp.h>
 
 using namespace FASTER::core;
@@ -43,7 +43,7 @@ int main(int argc, char *argv[]) {
   uint32_t num_threads = std::stoi(argv[9]);
 
   // create index
-  diskann::FasterVamanaIndex index(num_pts, dim, index_prefix);
+  diskann::FasterDiskANNZeroIndex index(num_pts, dim, index_prefix);
   // start a session (akin to FASTER KV::StartSession)
   index.StartSession();
 

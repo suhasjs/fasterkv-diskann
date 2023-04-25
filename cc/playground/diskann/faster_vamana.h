@@ -10,11 +10,10 @@
 #include <string>
 #include <unordered_set>
 
-#include "graph.h"
 #include "io_utils.h"
+#include "mem_graph.h"
 #include "search_utils.h"
-#include <mmintrin.h>
-#include <xmmintrin.h>
+#include <immintrin.h>
 
 #include "../src/core/faster.h"
 
@@ -76,8 +75,8 @@ public:
         ((graph_filesize / sizeof(uint32_t)) / this->num_points_) - 1;
     // compute memory requirement for FASTER store
     uint64_t per_key_memory =
-        sizeof(diskann::FlexibleValue) +          // size of object
-        (sizeof(uint32_t) * (approx_degree + 1)); // size of neighbors list
+        sizeof(diskann::FlexibleValue<uint32_t>) + // size of object
+        (sizeof(uint32_t) * (approx_degree + 1));  // size of neighbors list
     per_key_memory += sizeof(diskann::FixedSizeKey<uint32_t>); // size of key
     // round to nearest multiple of 8
     per_key_memory = ROUND_UP(per_key_memory, 16);
@@ -315,8 +314,8 @@ public:
         }
         // record IO stats
         query_stats->n_ios++;
-        query_stats->read_size +=
-            ((num_nbrs) * sizeof(uint32_t) + sizeof(diskann::FlexibleValue));
+        query_stats->read_size += ((num_nbrs) * sizeof(uint32_t) +
+                                   sizeof(diskann::FlexibleValue<uint32_t>));
         assert(num_nbrs <= MAX_VAMANA_DEGREE);
         // std::cout << "[" << cur_beam_size << "]" << "Cur node : " <<
         // cur_node_id << "," << cur_node_dist << ", " << num_nbrs << std::endl;

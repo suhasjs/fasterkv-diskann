@@ -52,22 +52,30 @@ inline bool further_is_better(const Candidate &a, const Candidate &b) {
   return a.dist > b.dist;
 }
 
-// a fast candidate priority queue that uses a static array of size
+// a fast candidate priority queue that uses 2 static arrays of size
 // _pq_alloc_size; sort after every insert/delete since it is cheap
 // for very small array; do not use heap operations (push_heap, pop_heap)
 // templated by the compare function to use (e.g.// closer_is_better)
 // NOTE:
-//      * array[0] = best candidate (wins comparison against all other
+//      * _array[0] = best candidate (wins comparison against all other
 //      candidates)
-//      * array[size-1] = worst candidate (loses comparison against all other
+//      * _array[size-1] = worst candidate (loses comparison against all other
 //      candidates)
-// supports: push -- inserts + sorts the array
-//           pop_worst -- pops the worst candidate, returns a copy of the popped
-//           candidate
-//           pop_best -- pops the best candidate, returns a copy of
-//           the popped candidate size -- returns the current size of the
-//           candidate list best -- returns a const reference to the best
-//           candidate worst -- returns a const reference to the worst candidate
+//     * _array1, _array2 are arrays of size _pq_alloc_size
+//     * _array points to one of _array1, _array2
+//     * _array1 and _array2 are flipped after every insert/delete
+//     * _array1 and _array2 are 32-byte aligned
+// supports: push_batch(c, n) -- inserts at-most `n` elements from `c` + sorts
+// the array; trims to best `max_size` candidates
+//           trim(n) -- trims the array to best `n` candidates
+//           size() -- returns the current size
+//           best() -- returns const reference to best candidate
+//           worst() -- returns const reference to worst candidate
+//           pop_best_n(n) -- pops the best `n` candidates from the array
+//           _flip_array() -- flips _use_default; _array must point to return
+//           value after caller finishes
+//          static create_from_array() -- creates the object from a
+//          pre-allocated 64-byte aligned buffer
 template <bool (*compare)(const Candidate &, const Candidate &)>
 class FastCandidatePQ {
 public:
