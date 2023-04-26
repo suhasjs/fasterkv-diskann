@@ -222,6 +222,7 @@ struct QueryStats {
   uint64_t cpu_ticks = 0; // total number of CPU ticks
 
   uint64_t n_ios = 0;     // total # of IOs issued
+  uint64_t n_cache = 0;   // total # of cache hits
   uint64_t read_size = 0; // total # of bytes read
   uint64_t n_cmps = 0;    // # dist cmps
   uint64_t n_hops = 0;    // # search iters
@@ -234,6 +235,7 @@ struct QueryStats {
     io_ticks += rhs.io_ticks;
     cpu_ticks += rhs.cpu_ticks;
     n_ios += rhs.n_ios;
+    n_cache += rhs.n_cache;
     read_size += rhs.read_size;
     n_cmps += rhs.n_cmps;
     n_hops += rhs.n_hops;
@@ -251,6 +253,7 @@ struct QueryStats {
     io_ticks /= rhs;
     cpu_ticks /= rhs;
     n_ios /= rhs;
+    n_cache /= rhs;
     read_size /= rhs;
     n_cmps /= rhs;
     n_hops /= rhs;
@@ -269,6 +272,7 @@ struct QueryStats {
     io_ticks = rhs.io_ticks;
     cpu_ticks = rhs.cpu_ticks;
     n_ios = rhs.n_ios;
+    n_cache = rhs.n_cache;
     read_size = rhs.read_size;
     n_cmps = rhs.n_cmps;
     n_hops = rhs.n_hops;
@@ -286,26 +290,39 @@ struct QueryContext {
   uint32_t *beam_nnbrs = nullptr;
   uint8_t *buf =
       nullptr; // uint8_t type to make it easier to do pointer arithmetic
+  float *beam_nbrs_data_cache = nullptr;
+  float **beam_nbrs_data = nullptr;
   uint64_t buf_size = 0;
   CloserPQ *unexplored_front = nullptr, *explored_front = nullptr;
 
-  QueryContext(uint32_t beam_width, uint32_t max_degree, uint32_t L_search) {
+  QueryContext(uint32_t beam_width, uint32_t max_degree, uint32_t L_search,
+               uint32_t aligned_dim = 0) {
     // compute buf size
     buf_size = 0;
 
     // round up to nearest multiple of 4 and 8 for alignment
     beam_width = ROUND_UP(beam_width, 8);
     max_degree = ROUND_UP(max_degree, 8);
+    aligned_dim = ROUND_UP(aligned_dim, 8);
+    uint64_t vec_alloc_size = (aligned_dim * sizeof(float));
+    vec_alloc_size = ROUND_UP(vec_alloc_size, 64); // 64B aligned
+
     uint32_t alloc_L_search = ROUND_UP(1.5 * L_search, 8);
     uint64_t pq_alloc_size =
-        ROUND_UP(2 * alloc_L_search * sizeof(Candidate), 16);
+        ROUND_UP(2 * alloc_L_search * sizeof(Candidate), 64);
     uint64_t front_alloc_size =
-        ROUND_UP(pq_alloc_size + 2 * sizeof(CloserPQ), 16);
-    buf_size += beam_width * sizeof(Candidate);                // cur_beam
+        ROUND_UP(pq_alloc_size + 2 * sizeof(CloserPQ), 64);
+    uint64_t data_alloc_size =
+        beam_width * vec_alloc_size;                 // vector data for beam
+    data_alloc_size = ROUND_UP(data_alloc_size, 64); // 64 byte alignment
+    buf_size += beam_width * sizeof(Candidate);      // cur_beam
     buf_size += (beam_width * max_degree) * sizeof(Candidate); // beam_new_cands
     buf_size += (beam_width * max_degree) * sizeof(uint32_t); // beam_nbrs_cache
     buf_size += beam_width * sizeof(uint32_t *);              // beam_nbrs
     buf_size += beam_width * sizeof(uint32_t);                // beam_nnbrs
+    buf_size = ROUND_UP(buf_size, 64); // 64B alignment for beam_nbrs_data_cache
+    buf_size += data_alloc_size;       // beam_nbrs_data_cache
+    buf_size += (beam_width * sizeof(float *)); // beam_nbrs_data
     buf_size += front_alloc_size; // unexplored_front, 2x arrays internally
     buf_size += front_alloc_size; // explored_front, 2x arrays internally
 
@@ -314,6 +331,8 @@ struct QueryContext {
 
     // alloc aligned buffer to buf
     this->buf = (uint8_t *)FASTER::core::aligned_alloc(256, buf_size);
+    // zero out buf
+    std::fill(buf, buf + buf_size, 0);
     // std::cout << "Allocating QueryContext: alloc " << buf_size << " B" <<
     // std::endl;
 
@@ -334,6 +353,14 @@ struct QueryContext {
     // allocate beam_nnbrs
     beam_nnbrs = (uint32_t *)(buf + offset);
     offset += beam_width * sizeof(uint32_t);
+    // allocate beam_nbrs_data_cache: 64B aligned
+    offset = ROUND_UP(offset, 64);
+    beam_nbrs_data_cache = (float *)(buf + offset);
+    offset += data_alloc_size;
+    // allocate beam_nbrs_data
+    beam_nbrs_data = (float **)(buf + offset);
+    offset += (beam_width * sizeof(float *));
+
     // allocate unexplored_front arrays
     unexplored_front =
         CloserPQ::create_from_array(buf + offset, L_search, alloc_L_search);
@@ -342,7 +369,8 @@ struct QueryContext {
     explored_front =
         CloserPQ::create_from_array(buf + offset, L_search, alloc_L_search);
     offset += front_alloc_size;
-    // std::cout << "QueryContext: offset=" << offset << std::endl;
+    std::cout << "QueryContext: offset=" << offset << std::endl;
+    std::cout << "QueryContext: buf_size=" << buf_size << std::endl;
     // sanity check
     assert(ROUND_UP(offset, 256) == buf_size);
 
@@ -350,6 +378,13 @@ struct QueryContext {
     beam_nbrs[0] = beam_nbrs_cache;
     for (uint32_t i = 0; i < beam_width; i++) {
       beam_nbrs[i] = beam_nbrs_cache + i * max_degree;
+    }
+    // set beam_nbrs_data
+    beam_nbrs_data[0] = beam_nbrs_data_cache;
+    for (uint32_t i = 0; i < beam_width; i++) {
+      // 64B alignment for all pointers
+      beam_nbrs_data[i] =
+          (float *)((uint8_t *)beam_nbrs_data_cache + (i * vec_alloc_size));
     }
   }
 

@@ -294,7 +294,7 @@ public:
       const Candidate *unexplored_front_data = unexplored_front->data();
       for (uint32_t i = 0; i < unexplored_front->size(); i++) {
         const Candidate &cand = unexplored_front_data[i];
-        if (cur_beam_size >= beam_width)
+        if (cur_beam_size > beam_width)
           break;
         // record as popped
         pop_count++;

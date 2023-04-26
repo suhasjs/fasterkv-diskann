@@ -45,6 +45,14 @@ private:
   // whether to verify after loading graph data
   bool verify_after_load_ = true;
 
+  // cache data for some nodes
+  // map from { node id -> (flat_arr_idx, num_nbrs) }
+  std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> cached_node_ids_;
+  float *cached_node_data_buf = nullptr;
+  uint64_t cached_node_data_size = 0; // in bytes
+  uint64_t cached_node_nbrs_size = 0; // in bytes
+  uint32_t *cached_node_nbrs_buf = nullptr;
+
 public:
   FasterDiskANNZeroIndex(const uint64_t num_points, const uint64_t dim,
                          const std::string &index_load_path)
@@ -224,12 +232,83 @@ public:
       // std::endl;
       delete this->graph_;
     }
+    if (this->cached_node_data_buf != nullptr) {
+      // std::cout << "~FasterDiskANNZeroIndex::Freeing cached node data" <<
+      // std::endl;
+      FASTER::core::aligned_free(this->cached_node_data_buf);
+    }
+    if (this->cached_node_nbrs_buf != nullptr) {
+      // std::cout << "~FasterDiskANNZeroIndex::Freeing cached node nbrs" <<
+      // std::endl;
+      FASTER::core::aligned_free(this->cached_node_nbrs_buf);
+    }
   }
 
   // not tracking any thread ID for now
   void StartSession() { this->graph_->StartSession(); }
 
   void StopSession() { this->graph_->StopSession(); }
+
+  // cache BFS levels 0-N for the index
+  void cache_bfs_levels(uint32_t max_num_nodes) {
+    // allocate memory for cached node data
+    this->cached_node_data_size = this->aligned_dim_ * sizeof(float);
+    this->cached_node_data_size = ROUND_UP(this->cached_node_data_size, 64);
+    uint64_t cached_node_data_buf_size =
+        max_num_nodes * this->cached_node_data_size;
+    this->cached_node_data_buf =
+        (float *)FASTER::core::aligned_alloc(cached_node_data_buf_size, 64);
+    // allocate memory for cached node nbrs
+    this->cached_node_nbrs_size = this->max_degree_ * sizeof(uint32_t);
+    this->cached_node_nbrs_size = ROUND_UP(this->cached_node_nbrs_size, 64);
+    uint64_t cached_node_nbrs_buf_size =
+        max_num_nodes * this->cached_node_nbrs_size;
+    this->cached_node_nbrs_buf =
+        (uint32_t *)FASTER::core::aligned_alloc(cached_node_nbrs_buf_size, 64);
+
+    // zero both arrays
+    std::fill(this->cached_node_data_buf,
+              this->cached_node_data_buf + cached_node_data_buf_size, 0);
+    std::fill(this->cached_node_nbrs_buf,
+              this->cached_node_nbrs_buf + cached_node_nbrs_buf_size, 0);
+
+    uint32_t cur_node_id = this->start_;
+    uint32_t cur_map_idx = 0;
+    std::queue<uint32_t> bfs_queue;
+    bfs_queue.push(cur_node_id);
+    while (!bfs_queue.empty() and cur_map_idx < max_num_nodes) {
+      // get current node ID to read from FASTER store
+      cur_node_id = bfs_queue.front();
+      bfs_queue.pop();
+      float *cur_node_data = this->cached_node_data_buf +
+                             (cur_map_idx * this->cached_node_data_size);
+      uint32_t *cur_node_nbrs = this->cached_node_nbrs_buf +
+                                (cur_map_idx * this->cached_node_nbrs_size);
+      // read node data from FASTER store
+      uint32_t vec_dim = 0, num_nbrs = 0;
+      this->Read(cur_node_id, cur_node_data, vec_dim, cur_node_nbrs, num_nbrs);
+      if (vec_dim != this->dim_) {
+        std::cout << "ERROR: vector dimension mismatch for node " << cur_node_id
+                  << std::endl;
+        exit(1);
+      }
+      if (num_nbrs > this->max_degree_) {
+        std::cout << "ERROR: number of neighbors exceeds max degree for node "
+                  << cur_node_id << std::endl;
+        exit(1);
+      }
+      // add neighbors to queue
+      for (uint32_t i = 0; i < num_nbrs; i++) {
+        bfs_queue.push(cur_node_nbrs[i]);
+      }
+      // add to map
+      this->cached_node_ids_[cur_node_id] =
+          std::make_pair(cur_map_idx, num_nbrs);
+      // increment map index
+      cur_map_idx++;
+    }
+    std::cout << "Cached " << cur_map_idx << " nodes" << std::endl;
+  }
 
   /*** Upsert ***/
   // Upsert (blindly replace without reading) adjacency list for a node
@@ -292,9 +371,13 @@ public:
     CloserPQ *unexplored_front = context->unexplored_front;
     CloserPQ *explored_front = context->explored_front;
 
-    // initialize visited set
+    // initialize visited set --> set of nodes expanded (and/or dist compared)
     std::unordered_set<uint32_t> visited_set;
 
+    // initialize visited set --> call into _blitz_search
+    this->_blitz_search(query, k_NN, L_search, query_stats, context,
+                        visited_set);
+    /*
     // cached neighbor list
     Candidate *cur_beam = context->cur_beam;
     Candidate *beam_new_cands = context->beam_new_cands;
@@ -302,21 +385,26 @@ public:
     uint32_t cur_beam_size = 0;
     uint32_t **beam_nbrs = context->beam_nbrs;
     uint32_t *beam_nnbrs = context->beam_nnbrs;
+    float **beam_nbrs_data = context->beam_nbrs_data;
 
-    // seed `unexplored_front` with start node
-    uint32_t start_node_idx = this->start_;
-    const float *start_node_vec =
-        this->data_ + (start_node_idx * this->aligned_dim_);
-    // prefetch start node vector
-    _mm_prefetch((const char *)start_node_vec, _MM_HINT_NTA);
-    float query_start_dist =
-        diskann::compare<float>(query, start_node_vec, this->aligned_dim_);
-    query_stats->n_cmps++;
-    beam_new_cands[0] = Candidate{start_node_idx, query_start_dist};
-    unexplored_front->push_batch(beam_new_cands, 1);
-    visited_set.insert(start_node_idx);
+    // lambda to read a node data and nbrs
+    auto read_node_vec_nbrs = [&this](uint32_t node_idx, float *node_vec,
+                                      uint32_t *node_nbrs) {
+      uint32_t node_vec_dim = 0, node_nnbrs = 0;
+      this->Read(node_idx, node_vec, node_vec_dim, node_nbrs, node_nnbrs);
+      query_stats->n_ios++;
+      assert(node_vec_dim == this->dim_);
+      assert(node_nnbrs <= this->max_degree_);
+    };
 
-    uint32_t MAX_ITERS = 1000, cur_iter = 0;
+    float get_query_dist =
+        [&this->aligned_dim_](const float *query, const float *node_vec) {
+          diskann::compare<float>(query, node_vec, this->aligned_dim_);
+          query_stats->n_cmps++;
+        }
+
+    uint32_t MAX_ITERS = 1000;
+    uint32_t cur_iter = query_stats->n_hops;
     query_stats->io_ticks = 0;
     // start query search
     while (unexplored_front->size() > 0 && cur_iter < MAX_ITERS) {
@@ -344,17 +432,21 @@ public:
         cur_beam[cur_beam_size] = cand;
         uint32_t cur_node_id = cand.id;
         float cur_node_dist = cand.dist;
-
-        // read neighbors of candidate
+        // iterate through each neighbors
         uint32_t &num_nbrs = beam_nnbrs[cur_beam_size];
         // time IO
         {
           uint64_t start_tsc = __builtin_ia32_rdtsc();
-          float *bad_data = nullptr;
-          uint32_t bad_dim = 0;
-          this->Read(cand.id, bad_data, bad_dim, beam_nbrs[cur_beam_size],
-                     num_nbrs);
+          uint32_t cur_node_vec_dim = 0;
+          this->Read(cand.id, beam_data[cur_beam_size], cur_node_vec_dim,
+                     beam_nbrs[cur_beam_size], num_nbrs);
           query_stats->io_ticks += (__builtin_ia32_rdtsc() - start_tsc);
+          if (cur_node_vec_dim != this->dim_) {
+            std::cout << "Error: node " << cur_node_id
+                      << " has dim: " << cur_node_vec_dim
+                      << ", expected: " << this->dim_ << std::endl;
+            exit(-1);
+          }
           _mm_prefetch((const char *)beam_nbrs[cur_beam_size], _MM_HINT_T0);
         }
         // record IO stats
@@ -439,15 +531,187 @@ public:
 
     // record num iters
     query_stats->n_hops = cur_iter;
-
+*/
     // copy results to output
     // std::cout << "Final results:";
     const Candidate *explored_front_data = explored_front->data();
-    for (uint32_t i = 0; i < k_NN; i++) {
+    for (uint32_t i = 0; i < k_NN && i < explored_front->size(); i++) {
       knn_idxs[i] = explored_front_data[i].id;
       knn_dists[i] = explored_front_data[i].dist;
       // std::cout << "( " << explored_front_data[i].id << ", " <<
       // explored_front_data[i].dist << " ), ";
+    }
+    // std::cout << std::endl;
+    // std::cout << "Visited " << visited_set.size() << " nodes:";
+    // print all visited IDs
+    for (auto it = visited_set.begin(); it != visited_set.end(); it++) {
+      // std::cout << *it << ", ";
+    }
+    // std::cout << std::endl;
+  }
+
+  // quick in-memory search over 1-10k nodes to determine
+  // best 5-10 nodes to expand
+  void _blitz_search(const float *query, const uint32_t k_NN,
+                     const uint32_t L_search, QueryStats *query_stats,
+                     QueryContext *context,
+                     std::unordered_set<uint32_t> &visited_set) {
+    // default value for _blitz_search
+    uint32_t beam_width = 1;
+    // priority queue of neighbors
+    CloserPQ *unexplored_front = context->unexplored_front;
+    CloserPQ *explored_front = context->explored_front;
+
+    // cached neighbor list
+    Candidate *cur_beam = context->cur_beam;
+    Candidate *beam_new_cands = context->beam_new_cands;
+    uint32_t beam_num_new_cands = 0;
+    uint32_t cur_beam_size = 0;
+    uint32_t **beam_nbrs = context->beam_nbrs;
+    uint32_t *beam_nnbrs = context->beam_nnbrs;
+
+    // lambda to read a node nbrs
+    auto get_cached_nbrs = [&, this](uint32_t node_idx, uint32_t *&node_nbrs,
+                                     uint32_t &node_nnbrs) {
+      uint32_t map_idx = this->cached_node_ids_[node_idx].first;
+      node_nnbrs = this->cached_node_ids_[node_idx].second;
+      this->cached_node_data_buf + (map_idx * this->cached_node_data_size);
+      node_nbrs =
+          this->cached_node_nbrs_buf + (map_idx * this->cached_node_nbrs_size);
+      query_stats->n_cache++;
+    };
+
+    auto get_cached_query_dist = [&, this](const float *query,
+                                           const uint32_t node_id) {
+      uint32_t map_idx = this->cached_node_ids_[node_id].first;
+      const float *node_vec =
+          this->cached_node_data_buf + (map_idx * this->cached_node_data_size);
+      query_stats->n_cmps++;
+      return diskann::compare<float>(query, node_vec, this->aligned_dim_);
+    };
+
+    // seed `unexplored_front` with start node
+    uint32_t start_node_idx = this->start_;
+    float query_start_dist = get_cached_query_dist(query, start_node_idx);
+    beam_new_cands[0] = Candidate{start_node_idx, query_start_dist};
+    unexplored_front->push_batch(beam_new_cands, 1);
+    visited_set.insert(start_node_idx);
+
+    uint32_t MAX_ITERS = 1000, cur_iter = 0;
+    query_stats->io_ticks = 0;
+    // start query search
+    while (unexplored_front->size() > 0 && cur_iter < MAX_ITERS) {
+      // reset iter variables
+      cur_iter++;
+      cur_beam_size = 0;
+
+      // test early convergence of greedy search: top unexplored is worse than
+      // worst explored
+      if (explored_front->size() > 0) {
+        if (unexplored_front->best().dist > explored_front->worst().dist)
+          break;
+      }
+
+      // populate `beam_width` closest candidates from unexplored front
+      uint32_t pop_count = 0;
+      const Candidate *unexplored_front_data = unexplored_front->data();
+      for (uint32_t i = 0; i < unexplored_front->size(); i++) {
+        const Candidate &cand = unexplored_front_data[i];
+        if (cur_beam_size > beam_width)
+          break;
+        // record as popped
+        pop_count++;
+        // get current closest
+        cur_beam[cur_beam_size] = cand;
+        uint32_t cur_node_id = cand.id;
+        float cur_node_dist = cand.dist;
+        std::cout << "[" << cur_beam_size << "]"
+                  << "Cur node : " << cur_node_id << "," << cur_node_dist
+                  << std::endl;
+
+        // increment beam size
+        cur_beam_size++;
+      }
+
+      // pop number of considered candidates
+      unexplored_front->pop_best_n(pop_count);
+
+      // std::cout << "Iter: " << cur_iter << ", beam size: " << cur_beam_size
+      // << std::endl;
+      for (uint32_t i = 0; i < cur_beam_size; i++) {
+        // std::cout << "cand: " << cur_beam[i].id << ", " << cur_beam[i].dist
+        // << std::endl;
+      }
+
+      // number of viable new candidates generated
+      beam_num_new_cands = 0;
+      // iterate over neighbors for each candidate
+      for (uint32_t i = 0; i < cur_beam_size; i++) {
+        // get candidate
+        Candidate cur_cand = cur_beam[i];
+        // get neighbors
+        uint32_t *nbrs, num_nbrs;
+        get_cached_nbrs(cur_cand.id, nbrs, num_nbrs);
+
+        // iterate over neighbors for this candidate
+        for (uint32_t i = 0; i < num_nbrs; i++) {
+          // get neighbor ID
+          uint32_t nbr_id = nbrs[i];
+          // check if neighbor is in visited set
+          if (visited_set.find(nbr_id) != visited_set.end()) {
+            // skip neighbor
+            continue;
+          }
+          // check if nbr is in cached set; skip if not
+          auto iter = this->cached_node_ids_.find(nbr_id);
+          if (iter == this->cached_node_ids_.end()) {
+            continue;
+          }
+
+          // compute distance to query for nbr_id
+          float nbr_dist = get_cached_query_dist(query, nbr_id);
+
+          // check if `nbr_id` dist is worse than worst in explored front
+          if (explored_front->size() > 0) {
+            const Candidate &worst_ex = explored_front->worst();
+            if (nbr_dist >= worst_ex.dist) {
+              // skip `nbr_id` if worse than worst in explored front
+              // std::cout << "Skipping: " << nbr_id << ", dist: " << nbr_dist
+              // << std::endl;
+              continue;
+            }
+          }
+
+          // collect candidate for insertion
+          beam_new_cands[beam_num_new_cands++] = Candidate{nbr_id, nbr_dist};
+
+          // mark visited
+          visited_set.insert(nbr_id);
+        }
+      }
+
+      // insert all collected candidates into unexplored front
+      for (uint32_t i = 0; i < beam_num_new_cands; i++) {
+        std::cout << "Queueing: " << beam_new_cands[i].id
+                  << ", dist: " << beam_new_cands[i].dist << std::endl;
+      }
+      unexplored_front->push_batch(beam_new_cands, beam_num_new_cands);
+      unexplored_front->trim(L_search);
+
+      // add `beam` to explored front, truncate to best L_search
+      explored_front->push_batch(cur_beam, cur_beam_size);
+      explored_front->trim(L_search);
+    }
+
+    // record num iters
+    query_stats->n_hops = cur_iter;
+
+    // copy results to output
+    std::cout << " _blitz_search(): results ==>";
+    const Candidate *unexplored_front_data = unexplored_front->data();
+    for (uint32_t i = 0; i < unexplored_front->size(); i++) {
+      std::cout << "( " << unexplored_front_data[i].id << ", "
+                << unexplored_front_data[i].dist << " ), ";
     }
     // std::cout << std::endl;
     // std::cout << "Visited " << visited_set.size() << " nodes:";

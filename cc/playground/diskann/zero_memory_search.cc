@@ -9,6 +9,7 @@
 #include "faster_diskann_zero.h"
 #include <omp.h>
 
+#define BLITZ_CACHE_SIZE (1 << 12)
 using namespace FASTER::core;
 
 uint64_t get_p99_latency(diskann::QueryStats *stats, uint32_t num_queries) {
@@ -52,6 +53,9 @@ int main(int argc, char *argv[]) {
   index.load();
 
   uint64_t max_degree = index.get_max_degree();
+
+  // cache BFS levels 0-N
+  index.cache_bfs_levels(BLITZ_CACHE_SIZE);
 
   // load query data
   uint32_t num_queries, query_dim = dim;
@@ -104,6 +108,7 @@ int main(int argc, char *argv[]) {
 
   // run search (sequential)
   const auto start_t = std::chrono::high_resolution_clock::now();
+  num_queries = 1;
 #pragma omp parallel for num_threads(num_threads) schedule(dynamic, 1)
   for (uint32_t i = 0; i < num_queries; i++) {
     uint32_t thread_num = omp_get_thread_num();
