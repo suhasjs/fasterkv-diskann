@@ -108,7 +108,6 @@ int main(int argc, char *argv[]) {
 
   // run search (sequential)
   const auto start_t = std::chrono::high_resolution_clock::now();
-  num_queries = 1;
 #pragma omp parallel for num_threads(num_threads) schedule(dynamic, 1)
   for (uint32_t i = 0; i < num_queries; i++) {
     uint32_t thread_num = omp_get_thread_num();

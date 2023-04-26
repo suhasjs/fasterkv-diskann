@@ -377,6 +377,7 @@ public:
     // initialize visited set --> call into _blitz_search
     this->_blitz_search(query, k_NN, L_search, query_stats, context,
                         visited_set);
+    query_stats->n_ios = 1;
     /*
     // cached neighbor list
     Candidate *cur_beam = context->cur_beam;
@@ -533,11 +534,13 @@ public:
     query_stats->n_hops = cur_iter;
 */
     // copy results to output
-    // std::cout << "Final results:";
+    // std::cout << std::endl << "Explored front:";
     const Candidate *explored_front_data = explored_front->data();
-    for (uint32_t i = 0; i < k_NN && i < explored_front->size(); i++) {
-      knn_idxs[i] = explored_front_data[i].id;
-      knn_dists[i] = explored_front_data[i].dist;
+    for (uint32_t i = 0; i < explored_front->size(); i++) {
+      if (i < k_NN) {
+        knn_idxs[i] = explored_front_data[i].id;
+        knn_dists[i] = explored_front_data[i].dist;
+      }
       // std::cout << "( " << explored_front_data[i].id << ", " <<
       // explored_front_data[i].dist << " ), ";
     }
@@ -617,7 +620,7 @@ public:
       const Candidate *unexplored_front_data = unexplored_front->data();
       for (uint32_t i = 0; i < unexplored_front->size(); i++) {
         const Candidate &cand = unexplored_front_data[i];
-        if (cur_beam_size > beam_width)
+        if (cur_beam_size >= beam_width)
           break;
         // record as popped
         pop_count++;
@@ -625,9 +628,8 @@ public:
         cur_beam[cur_beam_size] = cand;
         uint32_t cur_node_id = cand.id;
         float cur_node_dist = cand.dist;
-        std::cout << "[" << cur_beam_size << "]"
-                  << "Cur node : " << cur_node_id << "," << cur_node_dist
-                  << std::endl;
+        // std::cout << "[" << cur_beam_size << "]" << "Cur node : " <<
+        // cur_node_id << "," << cur_node_dist << std::endl;
 
         // increment beam size
         cur_beam_size++;
@@ -692,8 +694,8 @@ public:
 
       // insert all collected candidates into unexplored front
       for (uint32_t i = 0; i < beam_num_new_cands; i++) {
-        std::cout << "Queueing: " << beam_new_cands[i].id
-                  << ", dist: " << beam_new_cands[i].dist << std::endl;
+        // std::cout << "Queueing: " << beam_new_cands[i].id << ", dist: " <<
+        // beam_new_cands[i].dist << std::endl;
       }
       unexplored_front->push_batch(beam_new_cands, beam_num_new_cands);
       unexplored_front->trim(L_search);
@@ -707,11 +709,11 @@ public:
     query_stats->n_hops = cur_iter;
 
     // copy results to output
-    std::cout << " _blitz_search(): results ==>";
+    // std::cout << " _blitz_search(): unexplored_front ==>";
     const Candidate *unexplored_front_data = unexplored_front->data();
     for (uint32_t i = 0; i < unexplored_front->size(); i++) {
-      std::cout << "( " << unexplored_front_data[i].id << ", "
-                << unexplored_front_data[i].dist << " ), ";
+      // std::cout << "( " << unexplored_front_data[i].id << ", " <<
+      // unexplored_front_data[i].dist << " ), ";
     }
     // std::cout << std::endl;
     // std::cout << "Visited " << visited_set.size() << " nodes:";
