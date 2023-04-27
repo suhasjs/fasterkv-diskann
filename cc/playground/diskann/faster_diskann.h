@@ -7,14 +7,15 @@
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
+#include <immintrin.h>
 #include <iostream>
 #include <string>
 #include <unordered_set>
 
 #include "disk_graph.h"
 #include "io_utils.h"
+#include "pq_utils.h"
 #include "search_utils.h"
-#include <immintrin.h>
 
 #include "../src/core/faster.h"
 
@@ -32,6 +33,11 @@ private:
   uint64_t diskann_nodesize_ = 0;
   diskann::DiskGraph *graph_ = nullptr;
   uint32_t start_ = 0;
+
+  // PQ params
+  uint8_t *pq_data_ = nullptr;
+  uint64_t pq_dim_ = 0, pq_aligned_dim_ = 0;
+  FixedChunkPQTable pq_table;
 
   // index parameters
   std::string index_load_path_ = "";
@@ -271,11 +277,48 @@ public:
     FASTER::core::aligned_free(aligned_sector_buf);
   }
 
+  void load_pq() {
+    std::string pq_pivots_path = this->index_load_path_ + "_pq_pivots.bin";
+    std::string pq_coords_path = this->index_load_path_ + "_pq_compressed.bin";
+
+    /* 1. Load PQ compressed vectors */
+    uint32_t pq_num_centroids, pq_pivots_dim;
+    uint32_t pq_num_pts;
+    diskann::get_bin_metadata(pq_coords_path, pq_num_pts, pq_pivots_dim);
+    std::cout << "PQ pivots metadata: pq_num_pts = " << pq_num_pts
+              << ", dim = " << pq_pivots_dim << std::endl;
+    if (pq_num_pts != this->num_points_) {
+      std::cout << "ERROR: PQ num points (" << pq_num_pts
+                << ") != index num points (" << this->num_points_ << ")"
+                << std::endl;
+      exit(1);
+    }
+    this->pq_dim_ = pq_pivots_dim;
+    // 64-bit alignment
+    this->pq_aligned_dim_ = ROUND_UP(this->pq_dim_, 8);
+    uint64_t pq_data_size = this->num_points_ * this->pq_aligned_dim_;
+    pq_data_size = ROUND_UP(pq_data_size, 256);
+    // alloc aligned mem for PQ data
+    this->pq_data_ = (uint8_t *)FASTER::core::aligned_alloc(pq_data_size, 256);
+    std::fill(this->pq_data_, this->pq_data_ + pq_data_size, 0);
+    diskann::populate_from_bin<uint8_t>(this->pq_data_, pq_coords_path,
+                                        this->num_points_, this->pq_dim_,
+                                        this->pq_aligned_dim_);
+
+    /* 2. Load PQ pivots */
+    // load centroids
+    this->pq_table.load_pq_centroid_bin(pq_pivots_path.c_str(), this->pq_dim_);
+  }
+
   ~FasterDiskANNIndex() {
     if (this->graph_ != nullptr) {
       // std::cout << "~FasterDiskANNIndex::Freeing FASTER store object " <<
       // std::endl;
       delete this->graph_;
+    }
+    if (this->pq_data_ != nullptr) {
+      // std::cout << "~FasterDiskANNIndex::Freeing PQ data" << std::endl;
+      FASTER::core::aligned_free(this->pq_data_);
     }
     if (this->cached_node_data_buf != nullptr) {
       // std::cout << "~FasterDiskANNIndex::Freeing cached node data" <<

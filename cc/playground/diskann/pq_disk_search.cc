@@ -51,6 +51,7 @@ int main(int argc, char *argv[]) {
   // load index
   std::cout << "Loading index " << std::endl;
   index.load();
+  index.load_pq();
 
   uint64_t max_degree = index.get_max_degree();
 

@@ -26,10 +26,13 @@ class cached_ofstream;
 
 // reads bin metadata from a file, and sets npts and dim accordingly
 inline void get_bin_metadata(const std::string &filename, uint32_t &npts,
-                             uint32_t &dim) {
+                             uint32_t &dim, const uint64_t offset = 0) {
   int npts_i32, dim_i32;
   std::ifstream reader;
   reader.open(filename, std::ios::in | std::ios::binary);
+  if (offset != 0) {
+    reader.seekg(offset, std::ios::beg);
+  }
   // read metadata for #pts and #dims
   reader.read((char *)&npts_i32, sizeof(int));
   reader.read((char *)&dim_i32, sizeof(int));
@@ -81,15 +84,21 @@ inline void get_graph_metadata(const std::string &filename, size_t &filesize,
 template <typename T>
 inline void populate_from_bin(T *data, const std::string &filename,
                               const uint32_t npts, const uint32_t dim,
-                              const uint32_t aligned_dim = 0) {
+                              const uint32_t aligned_dim = 0,
+                              const uint64_t offset = 0) {
   assert(data != nullptr);
   int npts_i32, dim_i32;
   std::ifstream reader;
   // std::cout << "Reading file: " << filename << "..." << std::endl;
   reader.open(filename, std::ios::in | std::ios::binary);
+  if (offset != 0) {
+    reader.seekg(offset, std::ios::beg);
+  }
   // read metadata for #pts and #dims
   reader.read((char *)&npts_i32, sizeof(int));
   reader.read((char *)&dim_i32, sizeof(int));
+  std::cout << "Binary metadata (" << filename << "): npts = " << npts_i32
+            << ", dim = " << dim_i32 << std::endl;
   assert(npts == (unsigned)npts_i32);
   assert(dim == (unsigned)dim_i32);
 
