@@ -24,13 +24,13 @@
 #define MAX_VAMANA_DEGREE (1 << 7)     // max degree for Vamana graph
 
 namespace diskann {
-class FasterDiskANNZeroIndex {
+class FasterDiskANNIndex {
 private:
   // basic index params
   uint64_t num_points_ = 0, dim_ = 0, aligned_dim_ = 0;
   uint64_t max_degree_ = 0;
+  uint64_t diskann_nodesize_ = 0;
   diskann::DiskGraph *graph_ = nullptr;
-  float *data_ = nullptr;
   uint32_t start_ = 0;
 
   // index parameters
@@ -54,21 +54,33 @@ private:
   uint32_t *cached_node_nbrs_buf = nullptr;
 
 public:
-  FasterDiskANNZeroIndex(const uint64_t num_points, const uint64_t dim,
-                         const std::string &index_load_path)
-      : num_points_{num_points}, dim_{dim}, index_load_path_{index_load_path} {
-    /*** 1. Load vector data ****/
-    std::string data_path = index_load_path + ".data";
+  FasterDiskANNIndex(const std::string &index_load_path)
+      : index_load_path_{index_load_path} {
+    /*** 1. Load metadata for index ****/
+    std::string disk_index_path = index_load_path + "_disk.index";
+    uint32_t md_size, md_dim;
+    diskann::get_bin_metadata(disk_index_path, md_size, md_dim);
+    std::vector<uint64_t> md_vals(md_size + 8, 0);
+    diskann::populate_from_bin<uint64_t>(md_vals.data(), disk_index_path,
+                                         md_size, 1, 1);
+    // populate metadata
+    this->num_points_ = md_vals[0];
+    this->dim_ = md_vals[1];
     // round up dim to multiple of 16 (good alignment for AVX ops)
-    this->aligned_dim_ = ROUND_UP(dim, 16);
-    std::cout << "Allocating memory for vector data " << std::endl;
-    this->data_ = reinterpret_cast<float *>(FASTER::core::aligned_alloc(
-        1024, this->num_points_ * this->aligned_dim_ * sizeof(float)));
-    // zero out the data array (to set unused dimensions to 0)
-    memset(this->data_, 0, this->num_points_ * this->dim_ * sizeof(float));
-    // populate vector data from data file
-    diskann::populate_from_bin<float>(this->data_, data_path, this->num_points_,
-                                      this->dim_, this->aligned_dim_);
+    this->aligned_dim_ = ROUND_UP(this->dim_, 16);
+    this->start_ = md_vals[2];
+    this->diskann_nodesize_ = md_vals[3];
+    this->max_degree_ =
+        (this->diskann_nodesize_ - (this->dim_ * sizeof(float))) /
+            sizeof(uint32_t) -
+        1;
+    std::cout << "Loaded metadata for index: " << std::endl;
+    std::cout << "Data: num_points = " << this->num_points_
+              << ", dim = " << this->dim_
+              << ", aligned_dim = " << this->aligned_dim_ << std::endl;
+    std::cout << "Index: start = " << this->start_
+              << ", nodesize = " << this->diskann_nodesize_
+              << ", max_degree = " << this->max_degree_ << std::endl;
 
     /*** 2. Configure FASTER store ****/
     // set max number of keys to be nearest power of 2 >= this->num_points_
@@ -78,17 +90,12 @@ public:
     std::cout << "Setting FASTER store max keys to " << this->faster_max_keys_
               << " (nearest power of 2 >= " << this->num_points_ << ")"
               << std::endl;
-    // read graph metadata from disk
-    size_t graph_filesize;
-    diskann::get_graph_metadata(index_load_path, graph_filesize, this->start_);
-    uint64_t approx_degree =
-        ((graph_filesize / sizeof(uint32_t)) / this->num_points_) - 1;
     // compute memory requirement for FASTER store
     uint64_t per_key_memory =
-        sizeof(diskann::DiskannValue<float>) +     // size of object
-        (sizeof(uint32_t) * (approx_degree + 1)) + // size of neighbors list
-        sizeof(float) * this->dim_;                // size of vector
-    per_key_memory += sizeof(diskann::FixedSizeKey<uint32_t>); // size of key
+        sizeof(diskann::DiskannValue<float>) + // size of value obj
+        this->diskann_nodesize_;               // data from disk
+    per_key_memory +=
+        sizeof(diskann::FixedSizeKey<uint32_t>); // size of key obj
     // round to nearest multiple of 8
     per_key_memory = ROUND_UP(per_key_memory, 16);
     this->faster_memory_size_ = this->faster_max_keys_ * per_key_memory;
@@ -100,7 +107,8 @@ public:
       this->faster_memory_size_ = MIN_FASTER_LOG_SIZE;
     std::cout << "Configuring FASTER store memory size to "
               << this->faster_memory_size_ / (1 << 20)
-              << " MB, per key memory = " << per_key_memory << std::endl;
+              << " MB, per key memory = " << per_key_memory << "B" << std::endl;
+
     /*** 3. Create FASTER store ****/
     this->graph_ = new diskann::DiskGraph(this->faster_max_keys_,
                                           this->faster_memory_size_,
@@ -119,57 +127,89 @@ public:
   void load() {
     /*** 4. Load graph data ****/
     std::cout << "Loading graph data into FASTER store" << std::endl;
-    std::ifstream graph_reader(this->index_load_path_,
+    std::string disk_index_path = this->index_load_path_ + "_disk.index";
+    std::ifstream graph_reader(disk_index_path,
                                std::ios::in | std::ios::binary);
-    // 24-byte header for Vamana graph
-    graph_reader.seekg(24, std::ios::beg);
+    // seek one sector to skip header
+    graph_reader.seekg(4096, std::ios::beg);
     // read and upsert graph data
     uint32_t node_id, num_nbrs;
-    uint32_t *nbrs = new uint32_t[128];
+    uint8_t *aligned_sector_buf =
+        (uint8_t *)FASTER::core::aligned_alloc(4096, 4096);
+    uint32_t *node_nbrs = nullptr;
+    float *node_data = nullptr;
+    uint64_t sector_buf_offset = 0;
+    // read first sector into buffer
+    graph_reader.read(reinterpret_cast<char *>(aligned_sector_buf), 4096);
+
     for (uint32_t i = 0; i < this->num_points_; i++) {
       node_id = i;
-      // read num neighbors
-      graph_reader.read(reinterpret_cast<char *>(&num_nbrs), sizeof(uint32_t));
-      // read all neighbros
-      graph_reader.read(reinterpret_cast<char *>(nbrs),
-                        sizeof(uint32_t) * num_nbrs);
+      uint8_t *node_buf = aligned_sector_buf + sector_buf_offset;
+      // vector data
+      node_data = reinterpret_cast<float *>(node_buf);
+      node_buf += this->dim_ * sizeof(float);
+      // num neighbors
+      num_nbrs = *(reinterpret_cast<uint32_t *>(node_buf));
+      node_buf += sizeof(uint32_t);
+      // read neighbros
+      node_nbrs = reinterpret_cast<uint32_t *>(node_buf);
       // upsert into FASTER store
-      float *node_data = this->data_ + (i * this->aligned_dim_);
-      this->Upsert(node_id, node_data, this->dim_, nbrs, num_nbrs);
+      // std::cout << "Upserting node " << node_id << " with degree: " <<
+      // num_nbrs << std::endl;
+      this->Upsert(node_id, node_data, this->dim_, node_nbrs, num_nbrs);
 
       // update max degree
       this->max_degree_ = std::max(this->max_degree_, (uint64_t)num_nbrs);
+
+      // update sector offset
+      sector_buf_offset += this->diskann_nodesize_;
+
+      // check if next node is in cur sector buf
+      if (sector_buf_offset + this->diskann_nodesize_ > 4096) {
+        // read next sector into buffer
+        graph_reader.read(reinterpret_cast<char *>(aligned_sector_buf), 4096);
+        sector_buf_offset = 0;
+      }
     }
 
     // round up max degree to nearest multiple of 8
-    this->max_degree_ = ROUND_UP(this->max_degree_, 8);
     std::cout << "Max degree = " << this->max_degree_ << std::endl;
+    std::cout << "Finished upserting index into FASTER store" << std::endl;
 
     // go back and verify all inserted data
     if (this->verify_after_load_) {
       std::cout << "Verifying inserted data" << std::endl;
-      uint32_t num_nbrs2, *nbrs2 = new uint32_t[128];
-      float *data2 = new float[this->aligned_dim_];
+      uint32_t num_nbrs_f;
+      std::vector<uint32_t> node_nbrs_f(2 * this->max_degree_, 0);
+      std::vector<float> node_data_f(2 * this->aligned_dim_, 0.0f);
+
+      // reset file pointer to second sector; read sector into buf
       graph_reader.close();
-      graph_reader.open(this->index_load_path_,
-                        std::ios::in | std::ios::binary);
-      graph_reader.seekg(24, std::ios::beg);
+      graph_reader.open(disk_index_path, std::ios::in | std::ios::binary);
+      graph_reader.seekg(4096, std::ios::beg);
+      graph_reader.read(reinterpret_cast<char *>(aligned_sector_buf), 4096);
+      sector_buf_offset = 0;
+
       // read graph data
       for (uint32_t i = 0; i < this->num_points_; i++) {
         node_id = i;
-        // read num neighbors from disk
-        graph_reader.read(reinterpret_cast<char *>(&num_nbrs),
-                          sizeof(uint32_t));
-        // read all neighbros from disk
-        graph_reader.read(reinterpret_cast<char *>(nbrs),
-                          sizeof(uint32_t) * num_nbrs);
+        uint8_t *node_buf = aligned_sector_buf + sector_buf_offset;
+        // vector data from disk
+        node_data = reinterpret_cast<float *>(node_buf);
+        node_buf += this->dim_ * sizeof(float);
+        // num neighbors from disk
+        num_nbrs = *(reinterpret_cast<uint32_t *>(node_buf));
+        node_buf += sizeof(uint32_t);
+        // neighbors from disk
+        node_nbrs = reinterpret_cast<uint32_t *>(node_buf);
         // read both from FASTER store
         uint32_t read_dim = 0;
-        this->Read(node_id, data2, read_dim, nbrs2, num_nbrs2);
+        this->Read(node_id, node_data_f.data(), read_dim, node_nbrs_f.data(),
+                   num_nbrs_f);
         // verify metadata for node
-        if (num_nbrs != num_nbrs2) {
+        if (num_nbrs != num_nbrs_f) {
           std::cout << "ERROR: num_nbrs mismatch for node " << node_id
-                    << " (disk = " << num_nbrs << ", FASTER = " << num_nbrs2
+                    << " (disk = " << num_nbrs << ", FASTER = " << num_nbrs_f
                     << ")" << std::endl;
           exit(1);
         }
@@ -181,37 +221,44 @@ public:
         }
         // verify neighbors
         for (uint32_t j = 0; j < num_nbrs; j++) {
-          if (nbrs[j] != nbrs2[j]) {
+          if (node_nbrs[j] != node_nbrs_f[j]) {
             std::cout << "ERROR: nbrs mismatch for node " << node_id
-                      << " (disk = " << nbrs[j] << ", FASTER = " << nbrs2[j]
-                      << ")" << std::endl;
+                      << " (disk = " << node_nbrs[j]
+                      << ", FASTER = " << node_nbrs_f[j] << ")" << std::endl;
             exit(1);
           }
         }
         // verify data
-        float *src_data = this->data_ + (i * this->aligned_dim_);
-        if (memcmp(src_data, data2, this->dim_ * sizeof(float)) != 0) {
+        if (memcmp(node_data, node_data_f.data(), this->dim_ * sizeof(float)) !=
+            0) {
           std::cout << "ERROR: data mismatch for node " << node_id << std::endl;
           // print out mem data and disk data for debugging
           std::cout << "Mem vector = ";
           for (uint32_t j = 0; j < this->dim_; j++) {
-            std::cout << src_data[j] << ",";
+            std::cout << node_data[j] << ",";
           }
           std::cout << std::endl;
           std::cout << "Disk vector = ";
           for (uint32_t j = 0; j < this->dim_; j++) {
-            std::cout << data2[j] << ",";
+            std::cout << node_data_f[j] << ",";
           }
           std::cout << std::endl;
           exit(1);
         }
+
+        // update sector offset
+        sector_buf_offset += this->diskann_nodesize_;
+
+        // check if next node is in cur sector buf
+        if (sector_buf_offset + this->diskann_nodesize_ > 4096) {
+          // read next sector into buffer
+          graph_reader.read(reinterpret_cast<char *>(aligned_sector_buf), 4096);
+          sector_buf_offset = 0;
+        }
       }
       // verification successful
       std::cout << "Verification successful" << std::endl;
-      delete[] nbrs2;
-      delete[] data2;
     }
-    delete[] nbrs;
 
     std::cout << "Finished loading graph data and verifying insertion into "
                  "FASTER store"
@@ -219,26 +266,24 @@ public:
 
     // close graph file
     graph_reader.close();
+
+    // free aligned sector buffer
+    FASTER::core::aligned_free(aligned_sector_buf);
   }
 
-  ~FasterDiskANNZeroIndex() {
-    if (this->data_ != nullptr) {
-      // std::cout << "~FasterDiskANNZeroIndex::Freeing vector data " <<
-      // std::endl;
-      FASTER::core::aligned_free(this->data_);
-    }
+  ~FasterDiskANNIndex() {
     if (this->graph_ != nullptr) {
-      // std::cout << "~FasterDiskANNZeroIndex::Freeing FASTER store object " <<
+      // std::cout << "~FasterDiskANNIndex::Freeing FASTER store object " <<
       // std::endl;
       delete this->graph_;
     }
     if (this->cached_node_data_buf != nullptr) {
-      // std::cout << "~FasterDiskANNZeroIndex::Freeing cached node data" <<
+      // std::cout << "~FasterDiskANNIndex::Freeing cached node data" <<
       // std::endl;
       FASTER::core::aligned_free(this->cached_node_data_buf);
     }
     if (this->cached_node_nbrs_buf != nullptr) {
-      // std::cout << "~FasterDiskANNZeroIndex::Freeing cached node nbrs" <<
+      // std::cout << "~FasterDiskANNIndex::Freeing cached node nbrs" <<
       // std::endl;
       FASTER::core::aligned_free(this->cached_node_nbrs_buf);
     }
@@ -318,6 +363,7 @@ public:
   //       nbrs: array of neighbors (uint32_t*)
   //       num_nbrs: number of neighbors (uint32_t)
   // Ensure `nbrs` has at least `num_nbrs` elements
+  // Ensure `data` has at least `dim` elements
   void Upsert(uint32_t node_id, float *data, uint32_t dim, uint32_t *nbrs,
               uint32_t num_nbrs) {
     auto callback = [](IAsyncContext *ctxt, Status result) {};

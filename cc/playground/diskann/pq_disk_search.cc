@@ -6,10 +6,10 @@
 #include <string>
 
 #include "../src/core/faster.h"
-#include "faster_diskann_zero.h"
+#include "faster_diskann.h"
 #include <omp.h>
 
-#define BLITZ_CACHE_SIZE (1 << 12)
+#define BLITZ_CACHE_SIZE (1 << 10)
 using namespace FASTER::core;
 
 uint64_t get_p99_latency(diskann::QueryStats *stats, uint32_t num_queries) {
@@ -44,7 +44,7 @@ int main(int argc, char *argv[]) {
   uint32_t num_threads = std::stoi(argv[9]);
 
   // create index
-  diskann::FasterDiskANNZeroIndex index(num_pts, dim, index_prefix);
+  diskann::FasterDiskANNIndex index(index_prefix);
   // start a session (akin to FASTER KV::StartSession)
   index.StartSession();
 
