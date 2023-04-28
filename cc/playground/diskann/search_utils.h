@@ -86,7 +86,6 @@ public:
     obj->_size = 0;
     obj->_max_size = max_size;
     obj->_pq_alloc_size = alloc_size;
-    obj->_array = obj->_array1;
     obj->_use_default = true;
 
     // setup arrays
@@ -100,6 +99,7 @@ public:
     // test write to bounds of array
     obj->_array1[alloc_size - 1].dist = 0;
     obj->_array2[alloc_size - 1].dist = 0;
+    obj->_array = obj->_array1;
     return obj;
   }
 
@@ -107,6 +107,7 @@ public:
   // step2: truncated-merge `c` with _array
   // only keep the best `max_size` candidates
   void push_batch(Candidate *c, uint32_t n) {
+    std::cout << "push_batch called with n = " << n << std::endl;
     // sort incoming array
     std::sort(c, c + n, compare);
     Candidate *_dest_array = _flip_array();
@@ -145,6 +146,7 @@ public:
   // copy the best n candidates into the out_arr
   // remove them from the array
   void pop_best_n(uint32_t n) {
+    std::cout << "pop_best_n called with n = " << n << std::endl;
     if (_size < n) {
       n = _size;
     }
@@ -307,7 +309,7 @@ struct QueryContext {
     max_degree = ROUND_UP(max_degree, 8);
     aligned_dim = ROUND_UP(aligned_dim, 8);
     uint64_t vec_alloc_size = (aligned_dim * sizeof(float));
-    vec_alloc_size = ROUND_UP(vec_alloc_size, 64); // 64B aligned
+    vec_alloc_size = ROUND_UP(vec_alloc_size, 128); // 64B aligned
 
     uint32_t alloc_L_search = ROUND_UP(1.5 * L_search, 8);
     // scratch for PQ computations
@@ -332,10 +334,6 @@ struct QueryContext {
     buf_size += (beam_width * sizeof(float *)); // beam_nbrs_data
     buf_size += front_alloc_size; // unexplored_front, 2x arrays internally
     buf_size += front_alloc_size; // explored_front, 2x arrays internally
-
-    // new page for big data structures
-    buf_size = ROUND_UP(buf_size, 4096);
-    buf_size += pq_scratch_size; // PQScratch
 
     // alloc aligned buffer to buf
     this->buf = (uint8_t *)FASTER::core::aligned_alloc(4096, buf_size);
@@ -376,16 +374,9 @@ struct QueryContext {
     explored_front =
         CloserPQ::create_from_array(buf + offset, L_search, alloc_L_search);
     offset += front_alloc_size;
-
-    // new page for big data structures
-    offset = ROUND_UP(offset, 4096);
-    // allocate PQScratch
-    pq_scratch = PQScratch<float>::create_from_array(buf + offset, max_degree,
-                                                     aligned_dim);
-    offset += pq_scratch_size;
     std::cout << "QueryContext: buf_size=" << buf_size << std::endl;
     // sanity check
-    assert(offset == buf_size);
+    assert(ROUND_UP(offset, 256) == buf_size);
 
     // set beam_nbrs
     beam_nbrs[0] = beam_nbrs_cache;
@@ -399,6 +390,8 @@ struct QueryContext {
       beam_nbrs_data[i] =
           (float *)((uint8_t *)beam_nbrs_data_cache + (i * vec_alloc_size));
     }
+
+    this->pq_scratch = new PQScratch<float>(max_degree, aligned_dim);
   }
 
   void reset() {
@@ -413,6 +406,9 @@ struct QueryContext {
       // std::cout << "Freeing QueryContext: released " << buf_size << " B" <<
       // std::endl;
       FASTER::core::aligned_free(buf);
+    }
+    if (this->pq_scratch != nullptr) {
+      delete this->pq_scratch;
     }
   }
 };

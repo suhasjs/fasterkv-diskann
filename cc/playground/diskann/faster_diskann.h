@@ -465,6 +465,8 @@ public:
     CloserPQ *unexplored_front = context->unexplored_front;
     // explored_front --> float (full-precision) distances
     CloserPQ *explored_front = context->explored_front;
+    explored_front->trim(0);
+    unexplored_front->trim(0);
 
     // set of visited nodes
     std::unordered_set<uint32_t> visited_set;
@@ -505,18 +507,31 @@ public:
     uint32_t *beam_nnbrs = context->beam_nnbrs;
     float **beam_nbrs_data = context->beam_nbrs_data;
 
+    auto get_float_dist = [&, this, query](const float *node_vec) {
+      query_stats->n_cmps++;
+      return diskann::compare<float>(query, node_vec, this->aligned_dim_);
+    };
     // lambda to read cur beam nodes from disk
-    auto read_cur_beam_from_disk = [&, this]() {
+    auto read_cur_beam_from_disk = [&, this, cur_beam, beam_nnbrs, beam_nbrs,
+                                    beam_nbrs_data](uint32_t count) {
+      std::cout << "Reading " << count << " nodes from disk" << std::endl;
       uint64_t start_tsc = __builtin_ia32_rdtsc();
       uint64_t cur_io_size = 0;
-      for (uint32_t i = 0; i < cur_beam_size; i++) {
-        uint32_t &node_nnbrs = beam_nnbrs[i], node_vec_dim = 0;
-        uint32_t *node_nbrs = beam_nbrs[i];
-        float *node_vec = beam_nbrs_data[i];
-        uint32_t node_idx = cur_beam[i].id;
+      for (uint32_t k = 0; k < count; k++) {
+        std::cout << "Reading node " << cur_beam[k].id << " from disk"
+                  << std::endl;
+        uint32_t &node_nnbrs = beam_nnbrs[k], node_vec_dim = 0;
+        uint32_t *node_nbrs = beam_nbrs[k];
+        float *node_vec = beam_nbrs_data[k];
+        uint32_t node_idx = cur_beam[k].id;
+        std::cout << "node_nbrs: " << node_nbrs << ", node_vec: " << node_vec
+                  << std::endl;
         this->Read(node_idx, node_vec, node_vec_dim, node_nbrs, node_nnbrs);
         _mm_prefetch((const char *)node_nbrs, _MM_HINT_T1);
         _mm_prefetch((const char *)node_vec, _MM_HINT_T1);
+        // replace PQ dist with float dist for beam node
+        cur_beam[k].dist = get_float_dist(node_vec);
+        std::cout << "new dist: " << cur_beam[k].dist << std::endl;
         assert(node_vec_dim == this->dim_);
         assert(node_nnbrs <= this->max_degree_);
         cur_io_size += ((node_nnbrs) * sizeof(uint32_t) +
@@ -528,10 +543,10 @@ public:
       query_stats->read_size += cur_io_size;
     };
 
-    auto get_float_dist = [&, this, query](const float *node_vec) {
-      query_stats->n_cmps++;
-      return diskann::compare<float>(query, node_vec, this->aligned_dim_);
-    };
+    /* seed search with start node */
+    cur_beam[0] = Candidate{this->start_, 1e7f};
+    visited_set.insert(this->start_);
+    unexplored_front->push_batch(cur_beam, 1);
 
     uint32_t MAX_ITERS = 10;
     uint32_t cur_iter = query_stats->n_hops;
@@ -545,25 +560,27 @@ public:
       // test early convergence of greedy search: top unexplored is worse than
       // worst explored
       if (explored_front->size() > 0) {
-        if (unexplored_front->best().dist > explored_front->worst().dist)
-          break;
+        if (unexplored_front->best().dist > explored_front->worst().dist) {
+          std::cout << "Early convergence" << std::endl;
+        }
+        break;
       }
 
       // collect up-to `beam_width` closest candidates from unexplored front
       uint32_t pop_count = 0;
       const Candidate *unexplored_front_data = unexplored_front->data();
-      for (uint32_t i = 0; i < unexplored_front->size(); i++) {
+      for (uint32_t i = 0;
+           i < unexplored_front->size() && cur_beam_size < beam_width; i++) {
         const Candidate &cand = unexplored_front_data[i];
-        if (cur_beam_size >= beam_width)
-          break;
         // record as popped
         pop_count++;
         // get current closest
         cur_beam[cur_beam_size] = cand;
         uint32_t cur_node_id = cand.id;
         float cur_node_dist = cand.dist;
-        // std::cout << "[" << cur_beam_size << "]" << "Cur node : " <<
-        // cur_node_id << "," << cur_node_dist << ", " << num_nbrs << std::endl;
+        std::cout << "[" << cur_beam_size << "]"
+                  << "Cur node : " << cur_node_id << "," << cur_node_dist
+                  << std::endl;
         // increment beam size
         cur_beam_size++;
       }
@@ -572,7 +589,7 @@ public:
       unexplored_front->pop_best_n(pop_count);
 
       // read all beam nodes from disk
-      read_cur_beam_from_disk();
+      read_cur_beam_from_disk(cur_beam_size);
 
       // std::cout << "Iter: " << cur_iter << ", beam size: " << cur_beam_size
       // << std::endl;
@@ -593,7 +610,7 @@ public:
         // compute dists for (centerd_query -> nbrs of cur_cand)
         compute_pq_dists(nbrs, num_nbrs);
         // iterate over neighbors for this candidate
-        for (uint32_t j = 0; j < num_nbrs; i++) {
+        for (uint32_t j = 0; j < num_nbrs; j++) {
           // get neighbor ID
           uint32_t nbr_id = nbrs[j];
           // check if neighbor is in visited set
@@ -603,7 +620,9 @@ public:
           }
           // compute distance to query
           float nbr_dist = dist_scratch[j];
-          // check if `nbr_id` dist is worse than worst in explored front
+          // std::cout << "Neighbor: " << nbr_id << ", dist: " << nbr_dist <<
+          // std::endl; check if `nbr_id` dist is worse than worst in explored
+          // front
           if (explored_front->size() > 0) {
             const Candidate &worst_ex = explored_front->worst();
             if (nbr_dist >= worst_ex.dist) {
@@ -620,16 +639,12 @@ public:
           // mark visited
           visited_set.insert(nbr_id);
         }
-
-        // replace cur_cand.dist with float dist
-        float *cand_vec = beam_nbrs_data[i];
-        cur_cand.dist = get_float_dist(cand_vec);
       }
 
       // insert all collected candidates into unexplored front
       for (uint32_t i = 0; i < beam_num_new_cands; i++) {
-        // std::cout << "Queueing: " << beam_new_cands[i].id << ", dist: " <<
-        // beam_new_cands[i].dist << std::endl;
+        std::cout << "Queueing: " << beam_new_cands[i].id
+                  << ", dist: " << beam_new_cands[i].dist << std::endl;
       }
       unexplored_front->push_batch(beam_new_cands, beam_num_new_cands);
       unexplored_front->trim(L_search);

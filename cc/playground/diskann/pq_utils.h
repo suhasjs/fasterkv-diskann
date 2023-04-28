@@ -66,11 +66,11 @@ template <typename T> struct PQScratch {
       nullptr; // MUST BE AT LEAST  [N_CHUNKS * MAX_DEGREE]
   float *rotated_query = nullptr;
   float *aligned_query_float = nullptr;
+  void *aligned_buf = nullptr; // backing buf for all pointers
 
   static uint64_t get_alloc_size(uint32_t max_degree, uint32_t aligned_dim) {
-    uint64_t alloc_size = ROUND_UP(sizeof(PQScratch<T>), 256);
     // aligned_pq_coord_scratch
-    alloc_size +=
+    uint64_t alloc_size =
         (uint64_t)max_degree * (uint64_t)MAX_PQ_CHUNKS * sizeof(uint8_t);
     // aligned_pqtable_dist_scratch
     alloc_size += 256 * (uint64_t)MAX_PQ_CHUNKS * sizeof(float);
@@ -83,45 +83,34 @@ template <typename T> struct PQScratch {
     return alloc_size;
   }
 
-  static PQScratch *create_from_array(uint8_t *obj_buf, uint32_t max_degree,
-                                      uint32_t aligned_dim) {
-    uint64_t alloc_size = PQScratch::get_alloc_size(max_degree, aligned_dim);
-    std::fill(obj_buf, obj_buf + alloc_size, 0);
-    // allocate memory for object
-    PQScratch *obj = new (obj_buf) PQScratch();
-    uint8_t *cur_buf = (uint8_t *)(obj_buf + 1);
-    cur_buf = (uint8_t *)ROUND_UP((uint64_t)cur_buf, 256);
+  PQScratch(uint32_t max_degree, uint32_t aligned_dim) {
+    uint64_t alloc_size = PQScratch<T>::get_alloc_size(max_degree, aligned_dim);
+    this->aligned_buf = FASTER::core::aligned_alloc(256, alloc_size);
+    memset(this->aligned_buf, 0, alloc_size);
+    uint8_t *cur_buf = (uint8_t *)this->aligned_buf;
 
     // pq coord scratch
-    obj->aligned_pq_coord_scratch = cur_buf;
+    this->aligned_pq_coord_scratch = cur_buf;
     cur_buf += (uint64_t)max_degree * (uint64_t)MAX_PQ_CHUNKS * sizeof(uint8_t);
 
     // pqtable dist scratch
-    obj->aligned_pqtable_dist_scratch = (float *)cur_buf;
+    this->aligned_pqtable_dist_scratch = (float *)cur_buf;
     cur_buf += 256 * (uint64_t)MAX_PQ_CHUNKS * sizeof(float);
 
     // dist scratch
-    obj->aligned_dist_scratch = (float *)cur_buf;
+    this->aligned_dist_scratch = (float *)cur_buf;
     cur_buf += ROUND_UP((uint64_t)max_degree * sizeof(float), 256);
 
     // query float
-    obj->aligned_query_float = (float *)cur_buf;
+    this->aligned_query_float = (float *)cur_buf;
     cur_buf += ROUND_UP(aligned_dim * sizeof(float), 256);
 
     // rotated query
-    obj->rotated_query = (float *)cur_buf;
+    this->rotated_query = (float *)cur_buf;
     cur_buf += ROUND_UP(aligned_dim * sizeof(float), 256);
-
-    return obj;
   }
 
-  ~PQScratch() {
-    FASTER::core::aligned_free(this->aligned_pq_coord_scratch);
-    FASTER::core::aligned_free(this->aligned_pqtable_dist_scratch);
-    FASTER::core::aligned_free(this->aligned_dist_scratch);
-    FASTER::core::aligned_free(this->aligned_query_float);
-    FASTER::core::aligned_free(this->rotated_query);
-  }
+  ~PQScratch() { FASTER::core::aligned_free(this->aligned_buf); }
 
   void set(size_t dim, const T *query, const float norm = 1.0f) {
     for (size_t d = 0; d < dim; ++d) {
