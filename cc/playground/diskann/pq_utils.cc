@@ -215,39 +215,6 @@ void FixedChunkPQTable::populate_chunk_inner_products(const float *query_vec,
     }
   }
 }
-
-void aggregate_coords(const std::vector<uint32_t> &ids,
-                      const uint8_t *all_coords, const uint64_t ndims,
-                      uint8_t *out) {
-  for (uint64_t i = 0; i < ids.size(); i++) {
-    memcpy(out + i * ndims, all_coords + ids[i] * ndims,
-           ndims * sizeof(uint8_t));
-  }
-}
-
-void pq_dist_lookup(const uint8_t *pq_ids, const uint64_t n_pts,
-                    const uint64_t pq_nchunks, const float *pq_dists,
-                    std::vector<float> &dists_out) {
-  //_mm_prefetch((char*) dists_out, _MM_HINT_T0);
-  _mm_prefetch((char *)pq_ids, _MM_HINT_T0);
-  _mm_prefetch((char *)(pq_ids + 64), _MM_HINT_T0);
-  _mm_prefetch((char *)(pq_ids + 128), _MM_HINT_T0);
-  dists_out.clear();
-  dists_out.resize(n_pts, 0);
-  for (uint64_t chunk = 0; chunk < pq_nchunks; chunk++) {
-    const float *chunk_dists = pq_dists + 256 * chunk;
-    if (chunk < pq_nchunks - 1) {
-      _mm_prefetch((char *)(chunk_dists + 256), _MM_HINT_T0);
-    }
-    for (uint64_t idx = 0; idx < n_pts; idx++) {
-      uint8_t pq_centerid = pq_ids[pq_nchunks * idx + chunk];
-      dists_out[idx] += chunk_dists[pq_centerid];
-    }
-  }
-}
-
-// Need to replace calls to these functions with calls to vector& based
-// functions above
 void aggregate_coords(const uint32_t *ids, const uint64_t n_ids,
                       const uint8_t *all_coords, const uint64_t ndims,
                       uint8_t *out) {
@@ -259,19 +226,21 @@ void aggregate_coords(const uint32_t *ids, const uint64_t n_ids,
 
 void pq_dist_lookup(const uint8_t *pq_ids, const uint64_t n_pts,
                     const uint64_t pq_nchunks, const float *pq_dists,
-                    float *dists_out) {
+                    float *dists_out, const uint64_t pq_aligned_nchunks) {
   _mm_prefetch((char *)dists_out, _MM_HINT_T0);
   _mm_prefetch((char *)pq_ids, _MM_HINT_T0);
   _mm_prefetch((char *)(pq_ids + 64), _MM_HINT_T0);
   _mm_prefetch((char *)(pq_ids + 128), _MM_HINT_T0);
   memset(dists_out, 0, n_pts * sizeof(float));
+  uint64_t offset_chunks =
+      (pq_aligned_nchunks == 0) ? pq_nchunks : pq_aligned_nchunks;
   for (uint64_t chunk = 0; chunk < pq_nchunks; chunk++) {
     const float *chunk_dists = pq_dists + 256 * chunk;
     if (chunk < pq_nchunks - 1) {
       _mm_prefetch((char *)(chunk_dists + 256), _MM_HINT_T0);
     }
     for (uint64_t idx = 0; idx < n_pts; idx++) {
-      uint8_t pq_centerid = pq_ids[pq_nchunks * idx + chunk];
+      uint8_t pq_centerid = pq_ids[pq_aligned_nchunks * idx + chunk];
       dists_out[idx] += chunk_dists[pq_centerid];
     }
   }

@@ -18,7 +18,7 @@
 #define MAX_OPQ_ITERS 20
 #define NUM_KMEANS_REPS_PQ 12
 #define MAX_PQ_TRAINING_SET_SIZE 256000
-#define MAX_PQ_CHUNKS 512
+#define MAX_PQ_CHUNKS 64
 
 namespace diskann {
 class FixedChunkPQTable {
@@ -123,7 +123,7 @@ template <typename T> struct PQScratch {
     FASTER::core::aligned_free(this->rotated_query);
   }
 
-  void set(size_t dim, T *query, const float norm = 1.0f) {
+  void set(size_t dim, const T *query, const float norm = 1.0f) {
     for (size_t d = 0; d < dim; ++d) {
       if (norm != 1.0f)
         rotated_query[d] = aligned_query_float[d] =
@@ -135,12 +135,12 @@ template <typename T> struct PQScratch {
   }
 };
 
-void aggregate_coords(const unsigned *ids, const uint64_t n_ids,
+void aggregate_coords(const uint32_t *ids, const uint64_t n_ids,
                       const uint8_t *all_coords, const uint64_t ndims,
                       uint8_t *out);
 
 void pq_dist_lookup(const uint8_t *pq_ids, const size_t n_pts,
                     const size_t pq_nchunks, const float *pq_dists,
-                    float *dists_out);
+                    float *dists_out, const uint64_t pq_aligned_nchunks = 0);
 
 } // namespace diskann

@@ -97,8 +97,8 @@ inline void populate_from_bin(T *data, const std::string &filename,
   // read metadata for #pts and #dims
   reader.read((char *)&npts_i32, sizeof(int));
   reader.read((char *)&dim_i32, sizeof(int));
-  std::cout << "Binary metadata (" << filename << "): npts = " << npts_i32
-            << ", dim = " << dim_i32 << std::endl;
+  // std::cout << "Binary metadata (" << filename << "): npts = " << npts_i32 <<
+  // ", dim = " << dim_i32 << std::endl;
   assert(npts == (unsigned)npts_i32);
   assert(dim == (unsigned)dim_i32);
 

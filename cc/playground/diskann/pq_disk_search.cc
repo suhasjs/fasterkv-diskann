@@ -56,7 +56,7 @@ int main(int argc, char *argv[]) {
   uint64_t max_degree = index.get_max_degree();
 
   // cache BFS levels 0-N
-  index.cache_bfs_levels(BLITZ_CACHE_SIZE);
+  // index.cache_bfs_levels(BLITZ_CACHE_SIZE);
 
   // load query data
   uint32_t num_queries, query_dim = dim;

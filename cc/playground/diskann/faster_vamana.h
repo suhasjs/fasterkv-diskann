@@ -344,9 +344,9 @@ public:
         uint32_t *nbrs = beam_nbrs[i];
         uint32_t num_nbrs = beam_nnbrs[i];
         // iterate over neighbors for this candidate
-        for (uint32_t i = 0; i < num_nbrs; i++) {
+        for (uint32_t j = 0; j < num_nbrs; j++) {
           // get neighbor ID
-          uint32_t nbr_id = nbrs[i];
+          uint32_t nbr_id = nbrs[j];
           // check if neighbor is in visited set
           if (visited_set.find(nbr_id) != visited_set.end()) {
             // skip neighbor

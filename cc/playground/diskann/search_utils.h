@@ -293,7 +293,9 @@ struct QueryContext {
   float *beam_nbrs_data_cache = nullptr;
   float **beam_nbrs_data = nullptr;
   uint64_t buf_size = 0;
-  CloserPQ *unexplored_front = nullptr, *explored_front = nullptr;
+  CloserPQ *unexplored_front = nullptr, *explored_front = nullptr,
+           *rerank_front = nullptr;
+  PQScratch<float> *pq_scratch = nullptr;
 
   QueryContext(uint32_t beam_width, uint32_t max_degree, uint32_t L_search,
                uint32_t aligned_dim = 0) {
@@ -308,6 +310,11 @@ struct QueryContext {
     vec_alloc_size = ROUND_UP(vec_alloc_size, 64); // 64B aligned
 
     uint32_t alloc_L_search = ROUND_UP(1.5 * L_search, 8);
+    // scratch for PQ computations
+    uint64_t pq_scratch_size =
+        PQScratch<float>::get_alloc_size(max_degree, aligned_dim);
+    // std::cout << "QueryContext: pq_scratch_size=" << pq_scratch_size << "B"
+    // << std::endl; allocate space for priority queues
     uint64_t pq_alloc_size =
         ROUND_UP(2 * alloc_L_search * sizeof(Candidate), 64);
     uint64_t front_alloc_size =
@@ -326,11 +333,12 @@ struct QueryContext {
     buf_size += front_alloc_size; // unexplored_front, 2x arrays internally
     buf_size += front_alloc_size; // explored_front, 2x arrays internally
 
-    // round up: 256 byte alignment
-    buf_size = ROUND_UP(buf_size, 256);
+    // new page for big data structures
+    buf_size = ROUND_UP(buf_size, 4096);
+    buf_size += pq_scratch_size; // PQScratch
 
     // alloc aligned buffer to buf
-    this->buf = (uint8_t *)FASTER::core::aligned_alloc(256, buf_size);
+    this->buf = (uint8_t *)FASTER::core::aligned_alloc(4096, buf_size);
     // zero out buf
     std::fill(buf, buf + buf_size, 0);
     // std::cout << "Allocating QueryContext: alloc " << buf_size << " B" <<
@@ -360,7 +368,6 @@ struct QueryContext {
     // allocate beam_nbrs_data
     beam_nbrs_data = (float **)(buf + offset);
     offset += (beam_width * sizeof(float *));
-
     // allocate unexplored_front arrays
     unexplored_front =
         CloserPQ::create_from_array(buf + offset, L_search, alloc_L_search);
@@ -369,10 +376,16 @@ struct QueryContext {
     explored_front =
         CloserPQ::create_from_array(buf + offset, L_search, alloc_L_search);
     offset += front_alloc_size;
-    std::cout << "QueryContext: offset=" << offset << std::endl;
+
+    // new page for big data structures
+    offset = ROUND_UP(offset, 4096);
+    // allocate PQScratch
+    pq_scratch = PQScratch<float>::create_from_array(buf + offset, max_degree,
+                                                     aligned_dim);
+    offset += pq_scratch_size;
     std::cout << "QueryContext: buf_size=" << buf_size << std::endl;
     // sanity check
-    assert(ROUND_UP(offset, 256) == buf_size);
+    assert(offset == buf_size);
 
     // set beam_nbrs
     beam_nbrs[0] = beam_nbrs_cache;

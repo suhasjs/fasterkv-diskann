@@ -59,6 +59,10 @@ private:
   uint64_t cached_node_nbrs_size = 0; // in bytes
   uint32_t *cached_node_nbrs_buf = nullptr;
 
+  uint8_t *get_pq_vec(uint32_t node_id) {
+    return this->pq_data_ + (uint64_t)node_id * this->pq_aligned_dim_;
+  }
+
 public:
   FasterDiskANNIndex(const std::string &index_load_path)
       : index_load_path_{index_load_path} {
@@ -457,18 +461,42 @@ public:
               uint32_t *knn_idxs, float *knn_dists, QueryStats *query_stats,
               uint32_t beam_width = 4, QueryContext *context = nullptr) {
     // initialize priority queue of neighbors
+    // unexplored_front --> PQ distances
     CloserPQ *unexplored_front = context->unexplored_front;
+    // explored_front --> float (full-precision) distances
     CloserPQ *explored_front = context->explored_front;
 
-    // initialize visited set --> set of nodes expanded (and/or dist compared)
+    // set of visited nodes
     std::unordered_set<uint32_t> visited_set;
 
-    // initialize visited set --> call into _blitz_search
-    this->_blitz_search(query, k_NN, L_search, query_stats, context,
-                        visited_set);
-    query_stats->n_ios = 1;
-    /*
-    // cached neighbor list
+    /* PQ-related initial query processing */
+    PQScratch<float> *pq_scratch = context->pq_scratch;
+    pq_scratch->set(this->dim_, query);
+    float *centered_query = pq_scratch->rotated_query;
+    // pre-process rotated vector (center)
+    // query <-> PQ chunk centers distances
+    float *pq_dists = pq_scratch->aligned_pqtable_dist_scratch;
+    // node nbrs PQ coord scratch (for locality of reference)
+    uint8_t *pq_coord_scratch = pq_scratch->aligned_pq_coord_scratch;
+    // query <-> node nbr dist scratch
+    float *dist_scratch = pq_scratch->aligned_dist_scratch;
+
+    // lambda to batch compute query<-> node distances in PQ space
+    auto compute_pq_dists = [&, this, pq_coord_scratch, pq_dists,
+                             dist_scratch](const uint32_t *input_ids,
+                                           const uint64_t n_ids) {
+      diskann::aggregate_coords(input_ids, n_ids, this->pq_data_,
+                                this->pq_aligned_dim_, pq_coord_scratch);
+      diskann::pq_dist_lookup(pq_coord_scratch, n_ids, this->pq_dim_, pq_dists,
+                              dist_scratch, this->pq_aligned_dim_);
+      query_stats->n_cmps += n_ids;
+    };
+
+    // populate query <-> PQ chunk distances
+    std::copy(query, query + this->dim_, centered_query);        // mutable
+    this->pq_table.preprocess_query(centered_query);             // center
+    pq_table.populate_chunk_distances(centered_query, pq_dists); // dists
+
     Candidate *cur_beam = context->cur_beam;
     Candidate *beam_new_cands = context->beam_new_cands;
     uint32_t beam_num_new_cands = 0;
@@ -477,23 +505,35 @@ public:
     uint32_t *beam_nnbrs = context->beam_nnbrs;
     float **beam_nbrs_data = context->beam_nbrs_data;
 
-    // lambda to read a node data and nbrs
-    auto read_node_vec_nbrs = [&this](uint32_t node_idx, float *node_vec,
-                                      uint32_t *node_nbrs) {
-      uint32_t node_vec_dim = 0, node_nnbrs = 0;
-      this->Read(node_idx, node_vec, node_vec_dim, node_nbrs, node_nnbrs);
-      query_stats->n_ios++;
-      assert(node_vec_dim == this->dim_);
-      assert(node_nnbrs <= this->max_degree_);
+    // lambda to read cur beam nodes from disk
+    auto read_cur_beam_from_disk = [&, this]() {
+      uint64_t start_tsc = __builtin_ia32_rdtsc();
+      uint64_t cur_io_size = 0;
+      for (uint32_t i = 0; i < cur_beam_size; i++) {
+        uint32_t &node_nnbrs = beam_nnbrs[i], node_vec_dim = 0;
+        uint32_t *node_nbrs = beam_nbrs[i];
+        float *node_vec = beam_nbrs_data[i];
+        uint32_t node_idx = cur_beam[i].id;
+        this->Read(node_idx, node_vec, node_vec_dim, node_nbrs, node_nnbrs);
+        _mm_prefetch((const char *)node_nbrs, _MM_HINT_T1);
+        _mm_prefetch((const char *)node_vec, _MM_HINT_T1);
+        assert(node_vec_dim == this->dim_);
+        assert(node_nnbrs <= this->max_degree_);
+        cur_io_size += ((node_nnbrs) * sizeof(uint32_t) +
+                        sizeof(diskann::DiskannValue<float>));
+      }
+      uint64_t end_tsc = __builtin_ia32_rdtsc();
+      query_stats->io_ticks += (end_tsc - start_tsc);
+      query_stats->n_ios += cur_beam_size;
+      query_stats->read_size += cur_io_size;
     };
 
-    float get_query_dist =
-        [&this->aligned_dim_](const float *query, const float *node_vec) {
-          diskann::compare<float>(query, node_vec, this->aligned_dim_);
-          query_stats->n_cmps++;
-        }
+    auto get_float_dist = [&, this, query](const float *node_vec) {
+      query_stats->n_cmps++;
+      return diskann::compare<float>(query, node_vec, this->aligned_dim_);
+    };
 
-    uint32_t MAX_ITERS = 1000;
+    uint32_t MAX_ITERS = 10;
     uint32_t cur_iter = query_stats->n_hops;
     query_stats->io_ticks = 0;
     // start query search
@@ -509,7 +549,7 @@ public:
           break;
       }
 
-      // populate `beam_width` closest candidates from unexplored front
+      // collect up-to `beam_width` closest candidates from unexplored front
       uint32_t pop_count = 0;
       const Candidate *unexplored_front_data = unexplored_front->data();
       for (uint32_t i = 0; i < unexplored_front->size(); i++) {
@@ -522,37 +562,17 @@ public:
         cur_beam[cur_beam_size] = cand;
         uint32_t cur_node_id = cand.id;
         float cur_node_dist = cand.dist;
-        // iterate through each neighbors
-        uint32_t &num_nbrs = beam_nnbrs[cur_beam_size];
-        // time IO
-        {
-          uint64_t start_tsc = __builtin_ia32_rdtsc();
-          uint32_t cur_node_vec_dim = 0;
-          this->Read(cand.id, beam_data[cur_beam_size], cur_node_vec_dim,
-                     beam_nbrs[cur_beam_size], num_nbrs);
-          query_stats->io_ticks += (__builtin_ia32_rdtsc() - start_tsc);
-          if (cur_node_vec_dim != this->dim_) {
-            std::cout << "Error: node " << cur_node_id
-                      << " has dim: " << cur_node_vec_dim
-                      << ", expected: " << this->dim_ << std::endl;
-            exit(-1);
-          }
-          _mm_prefetch((const char *)beam_nbrs[cur_beam_size], _MM_HINT_T0);
-        }
-        // record IO stats
-        query_stats->n_ios++;
-        query_stats->read_size += ((num_nbrs) * sizeof(uint32_t) +
-                                   sizeof(diskann::DiskannValue<float>));
-        assert(num_nbrs <= MAX_VAMANA_DEGREE);
         // std::cout << "[" << cur_beam_size << "]" << "Cur node : " <<
         // cur_node_id << "," << cur_node_dist << ", " << num_nbrs << std::endl;
-
         // increment beam size
         cur_beam_size++;
       }
 
       // pop number of considered candidates
       unexplored_front->pop_best_n(pop_count);
+
+      // read all beam nodes from disk
+      read_cur_beam_from_disk();
 
       // std::cout << "Iter: " << cur_iter << ", beam size: " << cur_beam_size
       // << std::endl;
@@ -566,27 +586,23 @@ public:
       // iterate over neighbors for each candidate
       for (uint32_t i = 0; i < cur_beam_size; i++) {
         // get candidate
-        Candidate cur_cand = cur_beam[i];
+        Candidate &cur_cand = cur_beam[i];
         // get neighbors
         uint32_t *nbrs = beam_nbrs[i];
         uint32_t num_nbrs = beam_nnbrs[i];
+        // compute dists for (centerd_query -> nbrs of cur_cand)
+        compute_pq_dists(nbrs, num_nbrs);
         // iterate over neighbors for this candidate
-        for (uint32_t i = 0; i < num_nbrs; i++) {
+        for (uint32_t j = 0; j < num_nbrs; i++) {
           // get neighbor ID
-          uint32_t nbr_id = nbrs[i];
+          uint32_t nbr_id = nbrs[j];
           // check if neighbor is in visited set
           if (visited_set.find(nbr_id) != visited_set.end()) {
             // skip neighbor
             continue;
           }
-          // get vec for the neighbor
-          const float *nbr_vec = this->data_ + (nbr_id * this->aligned_dim_);
-          // prefetch neighbor vector
-          _mm_prefetch((const char *)nbr_vec, _MM_HINT_NTA);
           // compute distance to query
-          float nbr_dist =
-              diskann::compare<float>(query, nbr_vec, this->aligned_dim_);
-          query_stats->n_cmps++;
+          float nbr_dist = dist_scratch[j];
           // check if `nbr_id` dist is worse than worst in explored front
           if (explored_front->size() > 0) {
             const Candidate &worst_ex = explored_front->worst();
@@ -604,6 +620,10 @@ public:
           // mark visited
           visited_set.insert(nbr_id);
         }
+
+        // replace cur_cand.dist with float dist
+        float *cand_vec = beam_nbrs_data[i];
+        cur_cand.dist = get_float_dist(cand_vec);
       }
 
       // insert all collected candidates into unexplored front
@@ -621,7 +641,6 @@ public:
 
     // record num iters
     query_stats->n_hops = cur_iter;
-*/
     // copy results to output
     // std::cout << std::endl << "Explored front:";
     const Candidate *explored_front_data = explored_front->data();
