@@ -303,7 +303,7 @@ public:
     uint64_t pq_data_size = this->num_points_ * this->pq_aligned_dim_;
     pq_data_size = ROUND_UP(pq_data_size, 256);
     // alloc aligned mem for PQ data
-    this->pq_data_ = (uint8_t *)FASTER::core::aligned_alloc(pq_data_size, 256);
+    this->pq_data_ = (uint8_t *)FASTER::core::aligned_alloc(256, pq_data_size);
     std::fill(this->pq_data_, this->pq_data_ + pq_data_size, 0);
     diskann::populate_from_bin<uint8_t>(this->pq_data_, pq_coords_path,
                                         this->num_points_, this->pq_dim_,
@@ -349,14 +349,14 @@ public:
     uint64_t cached_node_data_buf_size =
         max_num_nodes * this->cached_node_data_size;
     this->cached_node_data_buf =
-        (float *)FASTER::core::aligned_alloc(cached_node_data_buf_size, 64);
+        (float *)FASTER::core::aligned_alloc(64, cached_node_data_buf_size);
     // allocate memory for cached node nbrs
     this->cached_node_nbrs_size = this->max_degree_ * sizeof(uint32_t);
     this->cached_node_nbrs_size = ROUND_UP(this->cached_node_nbrs_size, 64);
     uint64_t cached_node_nbrs_buf_size =
         max_num_nodes * this->cached_node_nbrs_size;
     this->cached_node_nbrs_buf =
-        (uint32_t *)FASTER::core::aligned_alloc(cached_node_nbrs_buf_size, 64);
+        (uint32_t *)FASTER::core::aligned_alloc(64, cached_node_nbrs_buf_size);
 
     // zero both arrays
     std::fill(this->cached_node_data_buf,
@@ -487,8 +487,8 @@ public:
     auto compute_pq_dists = [&, this, pq_coord_scratch, pq_dists,
                              dist_scratch](const uint32_t *input_ids,
                                            const uint64_t n_ids) {
-      diskann::aggregate_coords(input_ids, n_ids, this->pq_data_,
-                                this->pq_aligned_dim_, pq_coord_scratch);
+      diskann::aggregate_coords(input_ids, n_ids, this->pq_data_, this->pq_dim_,
+                                pq_coord_scratch, this->pq_aligned_dim_);
       diskann::pq_dist_lookup(pq_coord_scratch, n_ids, this->pq_dim_, pq_dists,
                               dist_scratch, this->pq_aligned_dim_);
       query_stats->n_cmps += n_ids;
@@ -514,24 +514,24 @@ public:
     // lambda to read cur beam nodes from disk
     auto read_cur_beam_from_disk = [&, this, cur_beam, beam_nnbrs, beam_nbrs,
                                     beam_nbrs_data](uint32_t count) {
-      std::cout << "Reading " << count << " nodes from disk" << std::endl;
+      // std::cout << "Reading " << count << " nodes from disk" << std::endl;
       uint64_t start_tsc = __builtin_ia32_rdtsc();
       uint64_t cur_io_size = 0;
       for (uint32_t k = 0; k < count; k++) {
-        std::cout << "Reading node " << cur_beam[k].id << " from disk"
-                  << std::endl;
+        // std::cout << "Reading node " << cur_beam[k].id << " from disk" <<
+        // std::endl;
         uint32_t &node_nnbrs = beam_nnbrs[k], node_vec_dim = 0;
         uint32_t *node_nbrs = beam_nbrs[k];
         float *node_vec = beam_nbrs_data[k];
         uint32_t node_idx = cur_beam[k].id;
-        std::cout << "node_nbrs: " << node_nbrs << ", node_vec: " << node_vec
-                  << std::endl;
         this->Read(node_idx, node_vec, node_vec_dim, node_nbrs, node_nnbrs);
         _mm_prefetch((const char *)node_nbrs, _MM_HINT_T1);
         _mm_prefetch((const char *)node_vec, _MM_HINT_T1);
         // replace PQ dist with float dist for beam node
-        cur_beam[k].dist = get_float_dist(node_vec);
-        std::cout << "new dist: " << cur_beam[k].dist << std::endl;
+        float new_dist = get_float_dist(node_vec);
+        // std::cout << "Node ID: " << cur_beam[k].id << ", PQ dist: " <<
+        // cur_beam[k].dist << ", FP dist: " << new_dist << std::endl;
+        cur_beam[k].dist = new_dist;
         assert(node_vec_dim == this->dim_);
         assert(node_nnbrs <= this->max_degree_);
         cur_io_size += ((node_nnbrs) * sizeof(uint32_t) +
@@ -560,10 +560,13 @@ public:
       // test early convergence of greedy search: top unexplored is worse than
       // worst explored
       if (explored_front->size() > 0) {
-        if (unexplored_front->best().dist > explored_front->worst().dist) {
-          std::cout << "Early convergence" << std::endl;
+        float worst_explored_dist = explored_front->worst().dist;
+        float best_unexplored_dist = unexplored_front->best().dist;
+        if (best_unexplored_dist > worst_explored_dist) {
+          // std::cout << "Early convergence: " << best_unexplored_dist << " >
+          // "<< worst_explored_dist << std::endl;
+          break;
         }
-        break;
       }
 
       // collect up-to `beam_width` closest candidates from unexplored front
@@ -578,10 +581,8 @@ public:
         cur_beam[cur_beam_size] = cand;
         uint32_t cur_node_id = cand.id;
         float cur_node_dist = cand.dist;
-        std::cout << "[" << cur_beam_size << "]"
-                  << "Cur node : " << cur_node_id << "," << cur_node_dist
-                  << std::endl;
-        // increment beam size
+        // std::cout << "[" << cur_beam_size << "]" << "Cur node : " <<
+        // cur_node_id << "," << cur_node_dist<< std::endl; increment beam size
         cur_beam_size++;
       }
 
@@ -642,14 +643,18 @@ public:
       }
 
       // insert all collected candidates into unexplored front
+      // std::cout << "Collected " << beam_num_new_cands << " candidates to
+      // insert into unexplored front." << std::endl;
       for (uint32_t i = 0; i < beam_num_new_cands; i++) {
-        std::cout << "Queueing: " << beam_new_cands[i].id
-                  << ", dist: " << beam_new_cands[i].dist << std::endl;
+        // std::cout << "Queueing: " << beam_new_cands[i].id << ", dist: " <<
+        // beam_new_cands[i].dist << std::endl;
       }
       unexplored_front->push_batch(beam_new_cands, beam_num_new_cands);
       unexplored_front->trim(L_search);
 
       // add `beam` to explored front, truncate to best L_search
+      // std::cout << "Pushing " << cur_beam_size << " candidates to explored
+      // front." << std::endl;
       explored_front->push_batch(cur_beam, cur_beam_size);
       explored_front->trim(L_search);
     }

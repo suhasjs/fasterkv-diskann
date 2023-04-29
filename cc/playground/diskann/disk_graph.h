@@ -41,8 +41,10 @@ public:
   }
 
   inline uint32_t size() const {
-    return sizeof(*this) + this->num_el_ * sizeof(uint32_t) +
-           this->num_dims_ * sizeof(T);
+    uint64_t size = sizeof(*this) + (this->num_el_ * sizeof(uint32_t)) +
+                    (this->num_dims_ * sizeof(T));
+    std::cout << "size: " << size << std::endl;
+    return size;
   }
 
   // set and get values for this value object
@@ -65,6 +67,14 @@ protected:
   }
   // where to write data into in this FlexibleValue object?
   inline uint32_t *buffer() { return reinterpret_cast<uint32_t *>(this + 1); }
+  inline uint32_t *nbrs_buffer() {
+    return (uint32_t *)((T *)buffer() + num_dims_);
+  }
+  inline const uint32_t *nbrs_buffer() const {
+    return (uint32_t *)((T *)buffer() + num_dims_);
+  }
+  inline T *data_buffer() { return (T *)buffer(); }
+  inline const T *data_buffer() const { return (T *)buffer(); }
 };
 
 // context to upsert a node + its neighbors into the graph
@@ -96,17 +106,14 @@ public:
 
   /// Non-atomic and atomic Put() methods.
   inline void Put(DiskannValue<T> &value) {
-    // get buffer to put
-    void *buffer = (void *)value.buffer();
-
-    // 1. store vector data
-    std::copy(data_, data_ + num_dims_, (T *)buffer);
     value.num_dims_ = num_dims_;
-
-    // 2. store neighbor data
-    buffer = (void *)((T *)buffer + num_dims_);
     value.num_el_ = num_nbrs_;
-    std::copy(nbrs_, nbrs_ + num_nbrs_, (uint32_t *)buffer);
+
+    // get buffer to put
+    // 1. store vector data
+    std::copy(data_, data_ + num_dims_, value.data_buffer());
+    // 2. store neighbor data
+    std::copy(nbrs_, nbrs_ + num_nbrs_, value.nbrs_buffer());
   }
 
   inline bool PutAtomic(DiskannValue<T> &value) {
@@ -138,10 +145,9 @@ public:
   typedef DiskannValue<T> value_t;
 
   // key: node ID
-  // output_buffer:
   DiskannReadContext(uint32_t key, T *output_data, uint32_t *output_num_dims,
-                     uint32_t *output_buffer, uint32_t *output_num_nbrs)
-      : key_{key}, output_nbrs{output_buffer}, output_num_nbrs{output_num_nbrs},
+                     uint32_t *output_nbrs, uint32_t *output_num_nbrs)
+      : key_{key}, output_nbrs{output_nbrs}, output_num_nbrs{output_num_nbrs},
         output_data{output_data}, output_num_dims{output_num_dims} {}
 
   /// Copy (and deep-copy) constructor.
@@ -154,16 +160,15 @@ public:
   inline const Key &key() const { return key_; }
 
   inline void Get(const DiskannValue<T> &value) {
-    // 1. copy vector data
-    void *buffer = (void *)value.buffer();
     *output_num_dims = value.num_dims_;
-    std::copy((T *)buffer, (T *)buffer + value.num_dims_, this->output_data);
-
-    // 2. copy neighbor data
     *output_num_nbrs = value.num_el_;
-    buffer = (void *)((T *)buffer + value.num_dims_);
-    std::copy((uint32_t *)buffer, (uint32_t *)buffer + value.num_el_,
-              output_nbrs);
+
+    // 1. copy vector data
+    const T *data_buf = value.data_buffer();
+    std::copy(data_buf, data_buf + value.num_dims_, this->output_data);
+    // 2. copy neighbor data
+    const uint32_t *nbrs_buf = value.nbrs_buffer();
+    std::copy(nbrs_buf, nbrs_buf + value.num_el_, this->output_nbrs);
   }
   inline void GetAtomic(const DiskannValue<T> &value) {
     // std::cout << "GetAtomic() called on node ID: {key_.key}, no atomic GET

@@ -79,35 +79,40 @@ inline bool further_is_better(const Candidate &a, const Candidate &b) {
 template <bool (*compare)(const Candidate &, const Candidate &)>
 class FastCandidatePQ {
 public:
-  static FastCandidatePQ *create_from_array(uint8_t *obj_buf, uint32_t max_size,
-                                            uint32_t alloc_size) {
-    // allocate memory for the object
-    FastCandidatePQ *obj = new (obj_buf) FastCandidatePQ();
-    obj->_size = 0;
-    obj->_max_size = max_size;
-    obj->_pq_alloc_size = alloc_size;
-    obj->_use_default = true;
+  FastCandidatePQ(uint32_t max_size) : _max_size(max_size), _use_default(true) {
+    // allocate memory for both arrays in one shot
+    uint64_t aligned_alloc_size =
+        ROUND_UP(sizeof(Candidate) * this->_max_size, 256);
+    this->_buf = FASTER::core::aligned_alloc(256, 4 * aligned_alloc_size);
+    memset(this->_buf, 0, 4 * aligned_alloc_size);
+    uint8_t *last_addr = (uint8_t *)this->_buf + 4 * aligned_alloc_size;
+    uint64_t capacity = (last_addr - (uint8_t *)this->_buf) / sizeof(Candidate);
+    // std::cout << "Total capacity: " << capacity << std::endl;
+    this->_size = 0;
+    this->_max_size = max_size;
+    this->_pq_alloc_size = aligned_alloc_size / sizeof(Candidate);
+    // std::cout << "Aligned capacity: " << _pq_alloc_size << std::endl;
+    this->_use_default = true;
 
     // setup arrays
-    Candidate *array1, *array2;
-    void *next_ptr = (void *)(obj + 1);
-    next_ptr = (void *)ROUND_UP((uint64_t)next_ptr, 16);
-    array1 = (Candidate *)next_ptr;
-    array2 = array1 + alloc_size;
-    obj->_array1 = array1;
-    obj->_array2 = array2;
+    this->_array1 = (Candidate *)this->_buf;
+    this->_array2 = this->_array1 + 2 * _pq_alloc_size;
+    this->_array = this->_array1;
+
     // test write to bounds of array
-    obj->_array1[alloc_size - 1].dist = 0;
-    obj->_array2[alloc_size - 1].dist = 0;
-    obj->_array = obj->_array1;
-    return obj;
+    this->_array1[this->_pq_alloc_size - 1].dist = 0;
+    this->_array2[this->_pq_alloc_size - 1].dist = 0;
+  }
+  ~FastCandidatePQ() {
+    if (_buf != nullptr) {
+      FASTER::core::aligned_free(_buf);
+    }
   }
 
   // step1: sort `c`
   // step2: truncated-merge `c` with _array
   // only keep the best `max_size` candidates
   void push_batch(Candidate *c, uint32_t n) {
-    std::cout << "push_batch called with n = " << n << std::endl;
     // sort incoming array
     std::sort(c, c + n, compare);
     Candidate *_dest_array = _flip_array();
@@ -146,7 +151,6 @@ public:
   // copy the best n candidates into the out_arr
   // remove them from the array
   void pop_best_n(uint32_t n) {
-    std::cout << "pop_best_n called with n = " << n << std::endl;
     if (_size < n) {
       n = _size;
     }
@@ -187,8 +191,10 @@ private:
   uint32_t _size = 0;
   // max allowed size of PQ
   uint32_t _max_size = 0;
-  // backing array size for each _array
+  // backing capacity for each _array
   uint32_t _pq_alloc_size = 0;
+  // backing buffer for the object
+  void *_buf = nullptr;
 };
 
 // specializations of FastCandidatePQ for closer/further comparators
@@ -284,9 +290,7 @@ struct QueryStats {
 
 struct QueryContext {
   Candidate *cur_beam = nullptr;
-  uint32_t cur_beam_size = 0;
   Candidate *beam_new_cands = nullptr;
-  uint32_t beam_num_new_cands = 0;
   uint32_t *beam_nbrs_cache = nullptr;
   uint32_t **beam_nbrs = nullptr;
   uint32_t *beam_nnbrs = nullptr;
@@ -295,8 +299,7 @@ struct QueryContext {
   float *beam_nbrs_data_cache = nullptr;
   float **beam_nbrs_data = nullptr;
   uint64_t buf_size = 0;
-  CloserPQ *unexplored_front = nullptr, *explored_front = nullptr,
-           *rerank_front = nullptr;
+  CloserPQ *unexplored_front = nullptr, *explored_front = nullptr;
   PQScratch<float> *pq_scratch = nullptr;
 
   QueryContext(uint32_t beam_width, uint32_t max_degree, uint32_t L_search,
@@ -332,8 +335,7 @@ struct QueryContext {
     buf_size = ROUND_UP(buf_size, 64); // 64B alignment for beam_nbrs_data_cache
     buf_size += data_alloc_size;       // beam_nbrs_data_cache
     buf_size += (beam_width * sizeof(float *)); // beam_nbrs_data
-    buf_size += front_alloc_size; // unexplored_front, 2x arrays internally
-    buf_size += front_alloc_size; // explored_front, 2x arrays internally
+    buf_size = ROUND_UP(buf_size, 4096);        // take whole pages
 
     // alloc aligned buffer to buf
     this->buf = (uint8_t *)FASTER::core::aligned_alloc(4096, buf_size);
@@ -367,16 +369,13 @@ struct QueryContext {
     beam_nbrs_data = (float **)(buf + offset);
     offset += (beam_width * sizeof(float *));
     // allocate unexplored_front arrays
-    unexplored_front =
-        CloserPQ::create_from_array(buf + offset, L_search, alloc_L_search);
-    offset += front_alloc_size;
+    unexplored_front = new CloserPQ(L_search);
+
     // allocate explored_front arrays
-    explored_front =
-        CloserPQ::create_from_array(buf + offset, L_search, alloc_L_search);
-    offset += front_alloc_size;
+    explored_front = new CloserPQ(L_search);
     std::cout << "QueryContext: buf_size=" << buf_size << std::endl;
     // sanity check
-    assert(ROUND_UP(offset, 256) == buf_size);
+    assert(ROUND_UP(offset, 4096) == buf_size);
 
     // set beam_nbrs
     beam_nbrs[0] = beam_nbrs_cache;
@@ -395,8 +394,6 @@ struct QueryContext {
   }
 
   void reset() {
-    cur_beam_size = 0;
-    beam_num_new_cands = 0;
     unexplored_front->trim(0);
     explored_front->trim(0);
   }
@@ -406,6 +403,12 @@ struct QueryContext {
       // std::cout << "Freeing QueryContext: released " << buf_size << " B" <<
       // std::endl;
       FASTER::core::aligned_free(buf);
+    }
+    if (this->unexplored_front != nullptr) {
+      delete this->unexplored_front;
+    }
+    if (this->explored_front != nullptr) {
+      delete this->explored_front;
     }
     if (this->pq_scratch != nullptr) {
       delete this->pq_scratch;

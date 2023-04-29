@@ -108,6 +108,9 @@ template <typename T> struct PQScratch {
     // rotated query
     this->rotated_query = (float *)cur_buf;
     cur_buf += ROUND_UP(aligned_dim * sizeof(float), 256);
+
+    // sanity check
+    assert(cur_buf == (uint8_t *)this->aligned_buf + alloc_size);
   }
 
   ~PQScratch() { FASTER::core::aligned_free(this->aligned_buf); }
@@ -125,11 +128,11 @@ template <typename T> struct PQScratch {
 };
 
 void aggregate_coords(const uint32_t *ids, const uint64_t n_ids,
-                      const uint8_t *all_coords, const uint64_t ndims,
-                      uint8_t *out);
+                      const uint8_t *all_coords, const uint64_t nchunks,
+                      uint8_t *out, const uint64_t aligned_nchunks = 0);
 
 void pq_dist_lookup(const uint8_t *pq_ids, const size_t n_pts,
-                    const size_t pq_nchunks, const float *pq_dists,
-                    float *dists_out, const uint64_t pq_aligned_nchunks = 0);
+                    const size_t nchunks, const float *pq_dists,
+                    float *dists_out, const uint64_t aligned_nchunks = 0);
 
 } // namespace diskann

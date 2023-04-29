@@ -89,8 +89,8 @@ int main(int argc, char *argv[]) {
   // setup query contexts
   std::vector<diskann::QueryContext *> query_contexts;
   for (uint32_t i = 0; i < num_threads; i++) {
-    query_contexts.emplace_back(
-        new diskann::QueryContext(beam_width, max_degree, L_search));
+    query_contexts.emplace_back(new diskann::QueryContext(
+        beam_width, max_degree, L_search, aligned_dim));
   }
 
   // times `func` on `args` and returns the time in microseconds
@@ -109,7 +109,6 @@ int main(int argc, char *argv[]) {
 
   // run search (sequential)
   const auto start_t = std::chrono::high_resolution_clock::now();
-  num_queries = 1;
 #pragma omp parallel for num_threads(num_threads) schedule(dynamic, 1)
   for (uint32_t i = 0; i < num_queries; i++) {
     uint32_t thread_num = omp_get_thread_num();
