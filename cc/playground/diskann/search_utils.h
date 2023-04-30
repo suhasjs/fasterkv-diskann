@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "../src/core/faster.h"
+#include "pq_utils.h"
 
 namespace diskann {
 
@@ -298,8 +299,10 @@ struct QueryContext {
       nullptr; // uint8_t type to make it easier to do pointer arithmetic
   float *beam_nbrs_data_cache = nullptr;
   float **beam_nbrs_data = nullptr;
+  float *beam_dists = nullptr;
   uint64_t buf_size = 0;
-  CloserPQ *unexplored_front = nullptr, *explored_front = nullptr;
+  CloserPQ *unexplored_front = nullptr, *explored_front = nullptr,
+           *rerank_front = nullptr;
   PQScratch<float> *pq_scratch = nullptr;
 
   QueryContext(uint32_t beam_width, uint32_t max_degree, uint32_t L_search,
@@ -334,8 +337,9 @@ struct QueryContext {
     buf_size += beam_width * sizeof(uint32_t);                // beam_nnbrs
     buf_size = ROUND_UP(buf_size, 64); // 64B alignment for beam_nbrs_data_cache
     buf_size += data_alloc_size;       // beam_nbrs_data_cache
-    buf_size += (beam_width * sizeof(float *)); // beam_nbrs_data
-    buf_size = ROUND_UP(buf_size, 4096);        // take whole pages
+    buf_size += (beam_width * sizeof(float *));           // beam_nbrs_data
+    buf_size += ROUND_UP(beam_width * sizeof(float), 64); // beam_dists
+    buf_size = ROUND_UP(buf_size, 4096);                  // take whole pages
 
     // alloc aligned buffer to buf
     this->buf = (uint8_t *)FASTER::core::aligned_alloc(4096, buf_size);
@@ -368,12 +372,19 @@ struct QueryContext {
     // allocate beam_nbrs_data
     beam_nbrs_data = (float **)(buf + offset);
     offset += (beam_width * sizeof(float *));
+    // allocate beam_dists
+    beam_dists = (float *)(buf + offset);
+    offset += ROUND_UP(beam_width * sizeof(float), 64);
+
     // allocate unexplored_front arrays
     unexplored_front = new CloserPQ(L_search);
 
     // allocate explored_front arrays
     explored_front = new CloserPQ(L_search);
-    std::cout << "QueryContext: buf_size=" << buf_size << std::endl;
+
+    // allocate rerank_front arrays
+    rerank_front = new CloserPQ(L_search);
+    // std::cout << "QueryContext: buf_size=" << buf_size << std::endl;
     // sanity check
     assert(ROUND_UP(offset, 4096) == buf_size);
 
@@ -396,6 +407,7 @@ struct QueryContext {
   void reset() {
     unexplored_front->trim(0);
     explored_front->trim(0);
+    rerank_front->trim(0);
   }
 
   ~QueryContext() {

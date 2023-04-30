@@ -125,6 +125,12 @@ int main(int argc, char *argv[]) {
     uint64_t end_tsc = __builtin_ia32_rdtsc();
     result_stats[i].cpu_ticks = end_tsc - start_tsc;
     result_stats[i].total_us = cur_query_time;
+    // print GT
+    // std::cout << "GT: ";
+    for (uint32_t j = 0; j < gk_kNN; j++) {
+      // std::cout << gt_data[i * gk_kNN + j] << " ";
+    }
+    // std::cout << std::endl;
   }
   const auto stop_t = std::chrono::high_resolution_clock::now();
   double time_seconds =

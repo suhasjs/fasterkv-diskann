@@ -234,7 +234,7 @@ void pq_dist_lookup(const uint8_t *pq_ids, const uint64_t n_pts,
   _mm_prefetch((char *)pq_ids, _MM_HINT_T0);
   _mm_prefetch((char *)(pq_ids + 64), _MM_HINT_T0);
   _mm_prefetch((char *)(pq_ids + 128), _MM_HINT_T0);
-  memset(dists_out, 0, n_pts * sizeof(float));
+  std::fill(dists_out, dists_out + n_pts, 0);
   uint64_t chunks_per_row = (aligned_nchunks == 0) ? nchunks : aligned_nchunks;
   for (uint64_t chunk = 0; chunk < nchunks; chunk++) {
     const float *chunk_dists = pq_dists + 256 * chunk;
