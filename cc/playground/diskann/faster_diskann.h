@@ -7,6 +7,7 @@
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
+#include <experimental/filesystem>
 #include <immintrin.h>
 #include <iostream>
 #include <string>
@@ -19,10 +20,10 @@
 
 #include "../src/core/faster.h"
 
-#define MIN_FASTER_LOG_SIZE (1 << 30)  // 1 GB
-#define FASTER_LOG_ALIGNMENT (1 << 25) // 32 MB
-#define MAX_BEAM_WIDTH (1 << 16)       // max beam width for beam search
-#define MAX_VAMANA_DEGREE (1 << 7)     // max degree for Vamana graph
+#define MIN_FASTER_LOG_SIZE ((uint64_t)1 << 30)  // 1 GB
+#define FASTER_LOG_ALIGNMENT ((uint64_t)1 << 25) // 32 MB
+#define MAX_BEAM_WIDTH ((uint64_t)1 << 4)    // max beam width for beam search
+#define MAX_VAMANA_DEGREE ((uint64_t)1 << 7) // max degree for Vamana graph
 
 namespace diskann {
 class FasterDiskANNIndex {
@@ -45,11 +46,12 @@ private:
   // FASTER store params
   uint64_t faster_max_keys_ = 0;
   uint64_t faster_memory_size_ = 0;
-  std::string faster_graph_path_ = "/dev/shm/diskann_zero.store";
+  std::string faster_graph_path_ =
+      "/mnt/datasets/bigann/float_learn/fasterkv_diskann.store";
 
   // extra config params
   // whether to verify after loading graph data
-  bool verify_after_load_ = true;
+  bool verify_after_load_ = false;
 
   // cache data for some nodes
   // map from { node id -> (flat_arr_idx, num_nbrs) }
@@ -115,15 +117,22 @@ public:
     // min FASTER log size is 1 GB
     if (this->faster_memory_size_ < MIN_FASTER_LOG_SIZE)
       this->faster_memory_size_ = MIN_FASTER_LOG_SIZE;
+    // TODO (suhasjs):: remove this explicit forcing of FASTER cache size
+    // this->faster_memory_size_ = MIN_FASTER_LOG_SIZE * 10;
     std::cout << "Configuring FASTER store memory size to "
               << this->faster_memory_size_ / (1 << 20)
               << " MB, per key memory = " << per_key_memory << "B" << std::endl;
 
     /*** 3. Create FASTER store ****/
+    // create directory in faster graph path
+    std::cout << "Pre-allocating log for FASTER store in "
+              << this->faster_graph_path_ << std::endl;
+    std::experimental::filesystem::create_directories(this->faster_graph_path_);
     this->graph_ = new diskann::DiskGraph(this->faster_max_keys_,
                                           this->faster_memory_size_,
-                                          this->faster_graph_path_);
-    std::cout << "Created FASTER store for VamanaIndex" << std::endl;
+                                          this->faster_graph_path_, 0.1, true);
+    std::cout << "Finished pre-allocating log for FASTER store, size: "
+              << this->faster_memory_size_ / (1 << 20) << " MB" << std::endl;
     // std::cout << "Finished configuring index. Call load() to load graph into
     // FASTER store. " << std::endl;
   }
@@ -174,6 +183,14 @@ public:
       // update sector offset
       sector_buf_offset += this->diskann_nodesize_;
 
+      // periodically complete writes to disk
+      uint64_t div_val = 1000000;
+      if (i % div_val == 0) {
+        this->graph_->CompletePending(true);
+        std::cout << "Inserted: " << i / div_val << "M/"
+                  << this->num_points_ / div_val << "M points." << std::endl;
+      }
+
       // check if next node is in cur sector buf
       if (sector_buf_offset + this->diskann_nodesize_ > 4096) {
         // read next sector into buffer
@@ -184,6 +201,8 @@ public:
 
     // round up max degree to nearest multiple of 8
     std::cout << "Max degree = " << this->max_degree_ << std::endl;
+    // complete pending requests (blocking)
+    this->graph_->CompletePending(true);
     std::cout << "Finished upserting index into FASTER store" << std::endl;
 
     // go back and verify all inserted data
