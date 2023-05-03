@@ -20,10 +20,12 @@
 
 #include "../src/core/faster.h"
 
-#define MIN_FASTER_LOG_SIZE ((uint64_t)1 << 30)  // 1 GB
-#define FASTER_LOG_ALIGNMENT ((uint64_t)1 << 25) // 32 MB
 #define MAX_BEAM_WIDTH ((uint64_t)1 << 4)    // max beam width for beam search
 #define MAX_VAMANA_DEGREE ((uint64_t)1 << 7) // max degree for Vamana graph
+#define MIN_FASTER_LOG_SIZE ((uint64_t)1 << 30)  // 1 GB
+#define FASTER_LOG_ALIGNMENT ((uint64_t)1 << 25) // 32 MB
+#define FASTER_LOG_SIZE ((uint64_t)1 << 31)      // 2 GB chosen
+#define FASTER_LOG_MUTABLE_FRAC (0.1f)           // 10% of log is mutable
 
 namespace diskann {
 class FasterDiskANNIndex {
@@ -45,9 +47,10 @@ private:
 
   // FASTER store params
   uint64_t faster_max_keys_ = 0;
-  uint64_t faster_memory_size_ = 0;
-  std::string faster_graph_path_ =
-      "/mnt/datasets/bigann/float_learn/fasterkv_diskann.store";
+  // size of in-mem log in bytes
+  uint64_t faster_log_size_ = 0;
+  float faster_log_mutable_fraction = 0.0f;
+  std::string faster_graph_dir_ = "";
 
   // extra config params
   // whether to verify after loading graph data
@@ -96,6 +99,9 @@ public:
 
     /*** 2. Configure FASTER store ****/
     // set max number of keys to be nearest power of 2 >= this->num_points_
+    this->faster_graph_dir_ = index_load_path + "_faster_dir";
+    this->faster_log_mutable_fraction = FASTER_LOG_MUTABLE_FRAC;
+    this->faster_log_size_ = FASTER_LOG_SIZE;
     this->faster_max_keys_ = 1;
     while (this->faster_max_keys_ < this->num_points_)
       this->faster_max_keys_ <<= 1;
@@ -109,30 +115,21 @@ public:
     per_key_memory +=
         sizeof(diskann::FixedSizeKey<uint32_t>); // size of key obj
     // round to nearest multiple of 8
-    per_key_memory = ROUND_UP(per_key_memory, 16);
-    this->faster_memory_size_ = this->faster_max_keys_ * per_key_memory;
-    // round up to nearest 32 MB region
-    this->faster_memory_size_ =
-        ROUND_UP(this->faster_memory_size_, FASTER_LOG_ALIGNMENT);
-    // min FASTER log size is 1 GB
-    if (this->faster_memory_size_ < MIN_FASTER_LOG_SIZE)
-      this->faster_memory_size_ = MIN_FASTER_LOG_SIZE;
-    // TODO (suhasjs):: remove this explicit forcing of FASTER cache size
-    // this->faster_memory_size_ = MIN_FASTER_LOG_SIZE * 10;
-    std::cout << "Configuring FASTER store memory size to "
-              << this->faster_memory_size_ / (1 << 20)
+    per_key_memory = ROUND_UP(per_key_memory, 8);
+    std::cout << "Configuring FASTER log size to "
+              << this->faster_log_size_ / (1 << 20)
               << " MB, per key memory = " << per_key_memory << "B" << std::endl;
 
     /*** 3. Create FASTER store ****/
     // create directory in faster graph path
-    std::cout << "Pre-allocating log for FASTER store in "
-              << this->faster_graph_path_ << std::endl;
-    std::experimental::filesystem::create_directories(this->faster_graph_path_);
-    this->graph_ = new diskann::DiskGraph(this->faster_max_keys_,
-                                          this->faster_memory_size_,
-                                          this->faster_graph_path_, 0.1, true);
+    std::cout << "Pre-allocating log, FASTER store dir: "
+              << this->faster_graph_dir_ << std::endl;
+    std::experimental::filesystem::create_directories(this->faster_graph_dir_);
+    this->graph_ = new diskann::DiskGraph(
+        this->faster_max_keys_, this->faster_log_size_, this->faster_graph_dir_,
+        this->faster_log_mutable_fraction, true);
     std::cout << "Finished pre-allocating log for FASTER store, size: "
-              << this->faster_memory_size_ / (1 << 20) << " MB" << std::endl;
+              << this->faster_log_size_ / (1 << 20) << " MB" << std::endl;
     // std::cout << "Finished configuring index. Call load() to load graph into
     // FASTER store. " << std::endl;
   }
