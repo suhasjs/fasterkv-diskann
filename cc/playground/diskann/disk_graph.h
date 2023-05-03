@@ -36,16 +36,10 @@ template <typename> class DiskannReadContext;
 template <typename T> class DiskannValue : public FlexibleValue<uint32_t> {
 public:
   // initialize FlexibleValue with 0 num nbrs
-  DiskannValue() : FlexibleValue<uint32_t>(), num_dims_{0} {
-    this->size_ = sizeof(*this);
-  }
+  DiskannValue()
+      : FlexibleValue<uint32_t>(), num_dims_{0}, size_{0}, num_nbrs_{0} {}
 
-  inline uint32_t size() const {
-    uint64_t size = sizeof(*this) + (this->num_el_ * sizeof(uint32_t)) +
-                    (this->num_dims_ * sizeof(T));
-    std::cout << "size: " << size << std::endl;
-    return size;
-  }
+  inline uint32_t size() const { return size_; }
 
   // set and get values for this value object
   friend class DiskannUpsertContext<T>;
@@ -56,7 +50,7 @@ protected:
   //  sizeof(*this) + num_nbrs_ * sizeof(uint32_t) +
   //  num_dims_ * sizeof(T)
   // sizeof(T) bytes per dim in vector
-  uint32_t num_dims_;
+  uint32_t num_dims_, num_nbrs_, size_;
 
   // where to read the data in this object?
   // data is stored as follows:
@@ -107,21 +101,23 @@ public:
   /// Non-atomic and atomic Put() methods.
   inline void Put(DiskannValue<T> &value) {
     value.num_dims_ = num_dims_;
-    value.num_el_ = num_nbrs_;
+    value.num_nbrs_ = num_nbrs_;
 
     // get buffer to put
     // 1. store vector data
     std::copy(data_, data_ + num_dims_, value.data_buffer());
     // 2. store neighbor data
     std::copy(nbrs_, nbrs_ + num_nbrs_, value.nbrs_buffer());
+
+    // set size of value
+    value.size_ = this->value_size();
   }
 
   inline bool PutAtomic(DiskannValue<T> &value) {
-    std::cout
-        << "PutAtomic() called on node ID: {key_.key}, no atomic PUT available"
-        << std::endl;
+    std::cout << "PutAtomic() called on node ID: " << key_.key
+              << ", no atomic PUT available" << std::endl;
     this->Put(value);
-    return true;
+    return false;
   }
 
 protected:
@@ -145,30 +141,31 @@ public:
   typedef DiskannValue<T> value_t;
 
   // key: node ID
-  DiskannReadContext(uint32_t key, T *output_data, uint32_t *output_num_dims,
-                     uint32_t *output_nbrs, uint32_t *output_num_nbrs)
-      : key_{key}, output_nbrs{output_nbrs}, output_num_nbrs{output_num_nbrs},
-        output_data{output_data}, output_num_dims{output_num_dims} {}
+  DiskannReadContext(uint32_t key, T *output_data, uint32_t *output_nbrs,
+                     uint32_t &num_nbrs, uint32_t &num_dims)
+      : key_{key}, output_nbrs{output_nbrs}, output_data{output_data},
+        output_num_nbrs{&num_nbrs}, output_num_dims{&num_dims} {}
 
   /// Copy (and deep-copy) constructor.
   DiskannReadContext(const DiskannReadContext &other)
       : key_{other.key_}, output_nbrs{other.output_nbrs},
-        output_num_nbrs{other.output_num_nbrs}, output_data{other.output_data},
+        output_data{other.output_data}, output_num_nbrs{other.output_num_nbrs},
         output_num_dims{other.output_num_dims} {}
 
   /// The implicit and explicit interfaces require a key() accessor.
   inline const Key &key() const { return key_; }
 
   inline void Get(const DiskannValue<T> &value) {
-    *output_num_dims = value.num_dims_;
-    *output_num_nbrs = value.num_el_;
-
     // 1. copy vector data
     const T *data_buf = value.data_buffer();
-    std::copy(data_buf, data_buf + value.num_dims_, this->output_data);
+    memcpy(this->output_data, data_buf, value.num_dims_ * sizeof(T));
     // 2. copy neighbor data
     const uint32_t *nbrs_buf = value.nbrs_buffer();
-    std::copy(nbrs_buf, nbrs_buf + value.num_el_, this->output_nbrs);
+    memcpy(this->output_nbrs, nbrs_buf, value.num_nbrs_ * sizeof(uint32_t));
+    // 3. set num nbrs and dims
+    *output_num_dims = value.num_dims_;
+    *output_num_nbrs = value.num_nbrs_;
+    // print all nbrs
   }
   inline void GetAtomic(const DiskannValue<T> &value) {
     // std::cout << "GetAtomic() called on node ID: {key_.key}, no atomic GET

@@ -108,10 +108,15 @@ int main(int argc, char *argv[]) {
   };
 
   // run search (sequential)
+  std::vector<bool> initialized(false, num_threads);
   const auto start_t = std::chrono::high_resolution_clock::now();
 #pragma omp parallel for num_threads(num_threads) schedule(dynamic, 1)
   for (uint32_t i = 0; i < num_queries; i++) {
     uint32_t thread_num = omp_get_thread_num();
+    if (!initialized[thread_num]) {
+      // start session for thread
+      index.StartSession();
+    }
     uint64_t start_tsc = __builtin_ia32_rdtsc();
     query_contexts[thread_num]->reset();
     // inputs to search

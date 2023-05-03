@@ -24,8 +24,8 @@
 #define MAX_VAMANA_DEGREE ((uint64_t)1 << 7) // max degree for Vamana graph
 #define MIN_FASTER_LOG_SIZE ((uint64_t)1 << 30)  // 1 GB
 #define FASTER_LOG_ALIGNMENT ((uint64_t)1 << 25) // 32 MB
-#define FASTER_LOG_SIZE ((uint64_t)1 << 31)      // 2 GB chosen
-#define FASTER_LOG_MUTABLE_FRAC (0.1f)           // 10% of log is mutable
+#define FASTER_LOG_SIZE ((uint64_t)1 << 28)      // 256 MB chosen
+#define FASTER_LOG_MUTABLE_FRAC (0.8f)           // 80% of log is mutable
 
 namespace diskann {
 class FasterDiskANNIndex {
@@ -54,7 +54,7 @@ private:
 
   // extra config params
   // whether to verify after loading graph data
-  bool verify_after_load_ = false;
+  bool verify_after_load_ = true;
 
   // cache data for some nodes
   // map from { node id -> (flat_arr_idx, num_nbrs) }
@@ -125,9 +125,9 @@ public:
     std::cout << "Pre-allocating log, FASTER store dir: "
               << this->faster_graph_dir_ << std::endl;
     std::experimental::filesystem::create_directories(this->faster_graph_dir_);
-    this->graph_ = new diskann::DiskGraph(
+    this->graph_ = new diskann::DiskGraph{
         this->faster_max_keys_, this->faster_log_size_, this->faster_graph_dir_,
-        this->faster_log_mutable_fraction, true);
+        this->faster_log_mutable_fraction, true};
     std::cout << "Finished pre-allocating log for FASTER store, size: "
               << this->faster_log_size_ / (1 << 20) << " MB" << std::endl;
     // std::cout << "Finished configuring index. Call load() to load graph into
@@ -181,11 +181,11 @@ public:
       sector_buf_offset += this->diskann_nodesize_;
 
       // periodically complete writes to disk
-      uint64_t div_val = 1000000;
+      uint64_t div_val = 1000;
+      this->graph_->CompletePending(true);
       if (i % div_val == 0) {
-        this->graph_->CompletePending(true);
-        std::cout << "Inserted: " << i / div_val << "M/"
-                  << this->num_points_ / div_val << "M points." << std::endl;
+        std::cout << "Inserted: " << i / div_val << "k/"
+                  << this->num_points_ / div_val << "k points." << std::endl;
       }
 
       // check if next node is in cur sector buf
@@ -201,6 +201,25 @@ public:
     // complete pending requests (blocking)
     this->graph_->CompletePending(true);
     std::cout << "Finished upserting index into FASTER store" << std::endl;
+
+    // checkpoint the graph
+    {
+      auto ckpt_callback = [](Status result, uint64_t serial_no) {
+        if (result != Status::Ok) {
+          std::cout << "Checkpoint failed with error: "
+                    << std::to_string(static_cast<int>(result)) << std::endl;
+        } else {
+          std::cout << "Async checkpoint completed. Serial number: "
+                    << serial_no << std::endl;
+        }
+      };
+      FASTER::core::Guid token;
+      std::cout << "Checkpointing FASTER store" << std::endl;
+      this->graph_->Checkpoint(nullptr, ckpt_callback, token);
+      this->graph_->CompletePending(true);
+      std::cout << "Finished checkpointing FASTER store, ckpt ID: "
+                << token.ToString() << std::endl;
+    }
 
     // go back and verify all inserted data
     if (this->verify_after_load_) {
@@ -281,6 +300,8 @@ public:
           graph_reader.read(reinterpret_cast<char *>(aligned_sector_buf), 4096);
           sector_buf_offset = 0;
         }
+        if (i % 100000 == 0)
+          std::cout << "Verified " << i << " nodes" << std::endl;
       }
       // verification successful
       std::cout << "Verification successful" << std::endl;
@@ -429,12 +450,15 @@ public:
   // Ensure `data` has at least `dim` elements
   void Upsert(uint32_t node_id, float *data, uint32_t dim, uint32_t *nbrs,
               uint32_t num_nbrs) {
-    auto callback = [](IAsyncContext *ctxt, Status result) {};
+    auto callback = [](IAsyncContext *ctxt, Status result) {
+      CallbackContext<diskann::DiskannUpsertContext<float>> context{ctxt};
+      assert(result == Status::Ok);
+    };
     // create upsert context
     diskann::DiskannUpsertContext<float> context{node_id, data, dim, nbrs,
                                                  num_nbrs};
     // upsert into store
-    auto result = this->graph_->Upsert(context, callback, 1);
+    auto result = this->graph_->Upsert(context, callback, node_id);
     if (result != Status::Ok) {
       std::cout << "Upsert failed with status " << result << std::endl;
     } else {
@@ -452,18 +476,44 @@ public:
   // Ensure `nbrs` has space to write least `max_degree_` elements
   void Read(uint32_t node_id, float *data, uint32_t &dim, uint32_t *nbrs,
             uint32_t &num_nbrs) {
-    // std::cout << "Reading key:" << node_id << std::endl;
-    auto callback = [](IAsyncContext *ctxt, Status result) {};
+    auto callback = [](IAsyncContext *ctxt, Status result) {
+      CallbackContext<diskann::DiskannReadContext<float>> context{ctxt};
+      assert(result == Status::Ok);
+    };
+    std::fill(nbrs, nbrs + this->max_degree_, 0);
+    std::fill(data, data + this->aligned_dim_, 0.0f);
+    num_nbrs = 0;
+    dim = 0;
 
     // create read context
-    diskann::DiskannReadContext<float> context{node_id, data, &dim, nbrs,
-                                               &num_nbrs};
-
-    // read from store
-    auto result = this->graph_->Read(context, callback, 1);
-    if (result != Status::Ok) {
+    diskann::DiskannReadContext<float> context{node_id, data, nbrs, num_nbrs,
+                                               dim};
+    // issue read to store
+    auto result =
+        this->graph_->Read(context, callback, this->num_points_ + node_id);
+    if (result == Status::Pending) {
+      // blocking read
+      bool ret;
+      while (*context.output_num_nbrs == 0) {
+        std::this_thread::sleep_for(std::chrono::microseconds(1));
+        ret = this->graph_->CompletePending(true);
+        this->graph_->Refresh();
+      }
+    } else if (result == Status::Ok) {
+    } else {
+    }
+    // safe to read from context object
+    num_nbrs = *context.output_num_nbrs;
+    uint32_t num_dims_read = *context.output_num_dims;
+    if (num_nbrs == 0) {
       std::cout << "Read " << node_id << ", " << nbrs << ", " << num_nbrs
-                << " --> failed with status " << result << std::endl;
+                << " --> failed with status " << std::to_string(int(result))
+                << std::endl;
+    }
+    if (num_dims_read != this->dim_) {
+      std::cout << "ERROR: read dimension mismatch for node " << node_id
+                << std::endl;
+      exit(1);
     }
 
     // std::cout << "Read " << num_nbrs << " neighbors for key " << node_id <<

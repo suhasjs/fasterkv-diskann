@@ -51,26 +51,25 @@ class GraphUpsertContext;
 class GraphReadContext;
 // variable size value implementation borrowed from test/compact_test.cc
 // size: size of buffer needed to hold this value object in memory (bytes)
-// num_el_: number of elements of size sizeof(T) contained in this object
+// num_nbrs_: number of elements of size sizeof(T) contained in this object
 template <typename T> class FlexibleValue {
 public:
-  FlexibleValue() : size_{sizeof(FlexibleValue<T>)}, num_el_{0} {}
+  FlexibleValue() : size_{sizeof(FlexibleValue<T>)}, num_nbrs_{0} {}
 
-  // size of this object in bytes
-  inline uint32_t size() const {
-    return sizeof(*this) + num_el_ * sizeof(uint32_t);
-  }
+  // size of this object in bytes --> must be set by creator before submitting
+  // to FASTER
+  inline uint32_t size() const { return size_; }
 
   // set and get values for this value object
   friend class GraphUpsertContext;
   friend class GraphReadContext;
 
 protected:
-  // size of this value object in bytes = sizeof(FlexibleValue) + num_el_ *
+  // size of this value object in bytes = sizeof(FlexibleValue) + num_nbrs_ *
   // sizeof(T)
   uint32_t size_;
   // sizeof(T) bytes per element
-  T num_el_;
+  uint32_t num_nbrs_;
 
   // where to read the data in this FlexibleValue object?
   inline const T *buffer() const {
@@ -106,20 +105,19 @@ public:
   /// Non-atomic and atomic Put() methods.
   inline void Put(FlexibleValue<uint32_t> &value) {
     // store num_nbrs and buffer in this value object
-    value.num_el_ = num_nbrs_;
+    value.num_nbrs_ = num_nbrs_;
     std::memcpy((void *)value.buffer(), (void *)nbrs_,
                 num_nbrs_ * sizeof(uint32_t));
+    value.size_ =
+        sizeof(FlexibleValue<uint32_t>) + (num_nbrs_ * sizeof(uint32_t));
   }
 
   inline bool PutAtomic(FlexibleValue<uint32_t> &value) {
     std::cout
         << "PutAtomic() called on node ID: {key_.key}, no atomic PUT available"
         << std::endl;
-    // In-place update overwrites num_nbrs and buffer, but not size.
-    value.num_el_ = num_nbrs_;
-    std::memcpy((void *)value.buffer(), (void *)nbrs_,
-                num_nbrs_ * sizeof(uint32_t));
-    return true;
+    this->Put(value);
+    return false;
   }
 
 protected:
@@ -141,10 +139,9 @@ public:
 
   // key: node ID
   // output_buffer:
-  GraphReadContext(uint32_t key, uint32_t *output_buffer,
+  GraphReadContext(uint32_t key, uint32_t *output_nbrs,
                    uint32_t *output_num_nbrs)
-      : key_{key}, output_nbrs{output_buffer}, output_num_nbrs{
-                                                   output_num_nbrs} {}
+      : key_{key}, output_nbrs{output_nbrs}, output_num_nbrs{output_num_nbrs} {}
 
   /// Copy (and deep-copy) constructor.
   GraphReadContext(const GraphReadContext &other)
@@ -156,17 +153,17 @@ public:
 
   inline void Get(const FlexibleValue<uint32_t> &value) {
     // set number of nbrs
-    *output_num_nbrs = value.num_el_;
+    *output_num_nbrs = value.num_nbrs_;
     // copy nbrs into output buffer
     std::memcpy((void *)output_nbrs, (void *)value.buffer(),
-                value.num_el_ * sizeof(uint32_t));
+                value.num_nbrs_ * sizeof(uint32_t));
   }
   inline void GetAtomic(const FlexibleValue<uint32_t> &value) {
     // set number of nbrs
-    *output_num_nbrs = value.num_el_;
+    *output_num_nbrs = value.num_nbrs_;
     // copy nbrs into output buffer
     std::memcpy((void *)output_nbrs, (void *)value.buffer(),
-                value.num_el_ * sizeof(uint32_t));
+                value.num_nbrs_ * sizeof(uint32_t));
     // std::cout << "GetAtomic() called on node ID: " << key_.key << ", no
     // atomic GET" << std::endl;
   }
