@@ -54,7 +54,7 @@ private:
 
   // extra config params
   // whether to verify after loading graph data
-  bool verify_after_load_ = true;
+  bool verify_after_load_ = false;
 
   // cache data for some nodes
   // map from { node id -> (flat_arr_idx, num_nbrs) }
