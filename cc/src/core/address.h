@@ -33,8 +33,8 @@ public:
   static constexpr uint64_t kAddressBits = 48;
   static constexpr uint64_t kMaxAddress = ((uint64_t)1 << kAddressBits) - 1;
   /// --of which 25 bits are used for offsets into a page, of size 2^25 = 32 MB.
-  // suhasjs: setting to 4MB pages
-  static constexpr uint64_t kOffsetBits = 22;
+  // suhasjs: setting to 16MB pages
+  static constexpr uint64_t kOffsetBits = 24;
   static constexpr uint32_t kMaxOffset = ((uint32_t)1 << kOffsetBits) - 1;
   /// --and the remaining 23 bits are used for the page index, allowing for
   /// approximately 8 million pages.

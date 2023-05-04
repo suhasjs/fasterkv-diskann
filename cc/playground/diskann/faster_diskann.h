@@ -182,8 +182,8 @@ public:
 
       // periodically complete writes to disk
       uint64_t div_val = 10000;
-      this->graph_->CompletePending(true);
       if (i % div_val == 0) {
+        this->graph_->CompletePending(true);
         std::cout << "Inserted: " << i / div_val << "0k/"
                   << this->num_points_ / div_val << "0k points." << std::endl;
       }
