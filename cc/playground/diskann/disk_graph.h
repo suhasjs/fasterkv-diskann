@@ -142,15 +142,15 @@ public:
 
   // key: node ID
   DiskannReadContext(uint32_t key, T *output_data, uint32_t *output_nbrs,
-                     uint32_t &num_nbrs, uint32_t &num_dims)
+                     uint32_t &num_nbrs, std::atomic<uint32_t> *pending)
       : key_{key}, output_nbrs{output_nbrs}, output_data{output_data},
-        output_num_nbrs{&num_nbrs}, output_num_dims{&num_dims} {}
+        output_num_nbrs{&num_nbrs}, pending_{pending} {}
 
   /// Copy (and deep-copy) constructor.
   DiskannReadContext(const DiskannReadContext &other)
       : key_{other.key_}, output_nbrs{other.output_nbrs},
-        output_data{other.output_data}, output_num_nbrs{other.output_num_nbrs},
-        output_num_dims{other.output_num_dims} {}
+        output_data{other.output_data},
+        output_num_nbrs{other.output_num_nbrs}, pending_{other.pending_} {}
 
   /// The implicit and explicit interfaces require a key() accessor.
   inline const Key &key() const { return key_; }
@@ -162,11 +162,12 @@ public:
     // 2. copy neighbor data
     const uint32_t *nbrs_buf = value.nbrs_buffer();
     memcpy(this->output_nbrs, nbrs_buf, value.num_nbrs_ * sizeof(uint32_t));
-    // 3. set num nbrs and dims
-    *output_num_dims = value.num_dims_;
+    // 3. set num nbrs
     *output_num_nbrs = value.num_nbrs_;
-    // print all nbrs
+    // 4. decrement pending to signal read completion
+    auto prev_val = pending_->fetch_sub(1);
   }
+
   inline void GetAtomic(const DiskannValue<T> &value) {
     // std::cout << "GetAtomic() called on node ID: {key_.key}, no atomic GET
     // available" << std::endl;
@@ -186,8 +187,9 @@ public:
   uint32_t *output_num_nbrs = nullptr;
   uint32_t *output_nbrs = nullptr;
   T *output_data = nullptr;
-  uint32_t *output_num_dims = nullptr;
+  std::atomic<uint32_t> *pending_ = nullptr;
 };
+
 typedef FASTER::environment::QueueIoHandler handler_t;
 
 typedef FasterKv<

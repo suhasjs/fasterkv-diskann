@@ -9,7 +9,6 @@
 #include "faster_diskann.h"
 #include <omp.h>
 
-#define BLITZ_CACHE_SIZE (1 << 10)
 using namespace FASTER::core;
 
 uint64_t get_p99_latency(diskann::QueryStats *stats, uint32_t num_queries) {
@@ -54,9 +53,6 @@ int main(int argc, char *argv[]) {
   index.load_pq();
 
   uint64_t max_degree = index.get_max_degree();
-
-  // cache BFS levels 0-N
-  // index.cache_bfs_levels(BLITZ_CACHE_SIZE);
 
   // load query data
   uint32_t num_queries, query_dim = dim;
@@ -165,8 +161,8 @@ int main(int argc, char *argv[]) {
             << avg(avg_stats.n_cmps) << ", " << avg(avg_stats.n_hops) << ", "
             << avg(avg_stats.n_ios) << ", " << avg(avg_stats.read_size) << ", "
             << avg_stats.read_size / avg_stats.n_ios << ", "
-            << avg(avg_stats.io_ticks) << ", "
-            << (uint64_t)avg(avg_stats.cpu_ticks) << std::endl;
+            << avg(avg_stats.io_ticks) / 1000 << "k, "
+            << (uint64_t)avg(avg_stats.cpu_ticks) / 1000 << "k" << std::endl;
 
   // stop session
   index.StopSession();
