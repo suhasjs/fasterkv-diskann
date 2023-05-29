@@ -21,6 +21,7 @@
 #define FASTER_LOG_ALIGNMENT (1 << 25) // 32 MB
 #define MAX_BEAM_WIDTH (1 << 16)       // max beam width for beam search
 #define MAX_VAMANA_DEGREE (1 << 7)     // max degree for Vamana graph
+
 namespace diskann {
 class FasterVamanaIndex {
 private:
@@ -41,7 +42,7 @@ private:
 
   // extra config params
   // whether to verify after loading graph data
-  bool verify_after_load_ = false;
+  bool verify_after_load_ = true;
 
 public:
   FasterVamanaIndex(const uint64_t num_points, const uint64_t dim,
@@ -135,7 +136,8 @@ public:
 
     // go back and verify all inserted data
     if (this->verify_after_load_) {
-      std::cout << "Verifying inserted data" << std::endl;
+      std::cout << "Verifying inserted data (verify_after_load_ is true)"
+                << std::endl;
       uint32_t num_nbrs2, *nbrs2 = new uint32_t[128];
       graph_reader.close();
       graph_reader.open(this->index_load_path_,
