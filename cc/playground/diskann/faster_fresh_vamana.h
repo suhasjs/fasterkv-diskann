@@ -495,7 +495,7 @@ public:
                   QueryContext *ctx = nullptr) {
     uint64_t last_active = this->last_active_id_.fetch_add(1);
     uint64_t new_id = last_active + 1;
-    std::cout << "Inserting new node with ID " << new_id << std::endl;
+    // std::cout << "Inserting new node with ID " << new_id << std::endl;
     // copy vector data to array
     float *new_vec_data = this->data_ + (new_id * this->aligned_dim_);
     std::memcpy(new_vec_data, new_vec, this->dim_ * sizeof(float));
@@ -503,19 +503,31 @@ public:
     // search for neighbors, return closest `L_index` neighbors
     std::vector<uint32_t> knn_idxs(ROUND_UP(L_index, 64), 0);
     std::vector<float> knn_dists(ROUND_UP(L_index, 64), 0);
-    this->search(new_vec, L_index, L_index, knn_idxs.data(), knn_dists.data(), nullptr, 1, ctx);
+    this->search(new_vec, L_index, L_index, knn_idxs.data(), knn_dists.data(), query_stats, 1, ctx);
 
     // alloc memory for new neighbors
     std::vector<std::pair<uint32_t, float>> cands(L_index);
+    /*
+    std::cout << "Found candidates : " << std::endl;
     for(uint64_t i=0; i < L_index; i++) {
+      std::cout << "(" << i << "->" << knn_idxs[i] << ", " << knn_dists[i] << ") ";
       cands[i] = std::make_pair(knn_idxs[i], knn_dists[i]);
     }
+    std::cout << std::endl;
+    */
 
     std::vector<uint32_t> pruned_nbrs;
     pruned_nbrs.reserve(this->max_degree_);
 
     // prune neighbors
     this->prune_neighbors(cands, pruned_nbrs);
+    /*
+    std::cout << "Pruned candidates: ";
+    for(uint64_t i=0; i < pruned_nbrs.size(); i++) {
+      std::cout << pruned_nbrs[i] << " ";
+    }
+    std::cout << std::endl;
+    */
 
     // upsert new_id into FASTER store
     this->Upsert(new_id, pruned_nbrs.data(), pruned_nbrs.size());
@@ -537,12 +549,20 @@ public:
 
         // trigger prune if num_nbrs > max_degree_
         if (num_nbrs > this->max_degree_) {
+          /*
+          std::cout << "Calling prune for node " << nbr_id << std::endl;
+          std::cout << "Old nbr list: ";
+          for(uint64_t k=0; k < num_nbrs; k++) {
+            std::cout << nbr_nbrs[k] << " ";
+          }
+          std::cout << std::endl;
+          */
           cands.resize(num_nbrs);
           for(uint64_t k=0;k < num_nbrs; k++) {
             float *src_vec = this->data_ + (nbr_id * this->aligned_dim_);
             float *dest_vec = this->data_ + (nbr_nbrs[k] * this->aligned_dim_);
             float src_dest_dist = diskann::compare<float>(src_vec, dest_vec, this->aligned_dim_);
-            cands[k] = std::make_pair(nbr_nbrs[i], src_dest_dist);
+            cands[k] = std::make_pair(nbr_nbrs[k], src_dest_dist);
           }
           nbr_nbrs.clear();
           // don't need to reserve as std::vector will grow only if it exceeds capacity
@@ -551,6 +571,13 @@ public:
           // prune neighbors into nbr_nbrs
           this->prune_neighbors(cands, nbr_nbrs);
           num_nbrs = nbr_nbrs.size();
+          /*
+          std::cout << "New nbr list: ";
+          for(uint64_t k=0; k < num_nbrs; k++) {
+            std::cout << nbr_nbrs[k] << " ";
+          }
+          std::cout << std::endl;
+          */
         }
         
         // upsert neighbor's neighbor list
@@ -558,6 +585,9 @@ public:
 
         // retry if 'atomic' upsert failed
         retry = !ret;
+        if (retry) {
+          std::cout << "Upsert failed for node " << nbr_id << ", retrying" << std::endl;
+        }
       }
     }
   
