@@ -178,6 +178,7 @@ public:
 
   /// Non-atomic and atomic Put() methods.
   inline void Put(MutFlexValue &value) {
+    // std::cout << "calling non-atomic put" << std::endl;
     value.gen_lock_.store(0);
     value.size_ =
         sizeof(MutFlexValue) + (num_nbrs_ * sizeof(uint32_t));
@@ -188,6 +189,7 @@ public:
   }
 
   inline bool PutAtomic(MutFlexValue &value) {
+    // std::cout << "calling atomic put" << std::endl;
     // gen number will change if some other thread updated value between Read and PutAtomic
     if (expected_gen_number_ != std::numeric_limits<uint64_t>::max() &&
         expected_gen_number_ != value.gen_lock_.load().gen_number) {
@@ -212,8 +214,7 @@ public:
     }
     // In-place update overwrites length and buffer, but not size.
     value.num_nbrs_ = num_nbrs_;
-    std::memcpy((void *)value.buffer(), (void *)nbrs_,
-                num_nbrs_ * sizeof(uint32_t))
+    std::memcpy((void *)value.buffer(), (void *)nbrs_, num_nbrs_ * sizeof(uint32_t));
     value.gen_lock_.unlock(false);
     return true;
   }
@@ -252,6 +253,7 @@ public:
   inline const Key &key() const { return key_; }
 
   inline void Get(const MutFlexValue &value) {
+    // std::cout << "calling non-atomic get" << std::endl;
     // can allow for stale reads ?
     // set number of nbrs
     *output_num_nbrs = value.num_nbrs_;
@@ -264,6 +266,7 @@ public:
     }
   }
   inline void GetAtomic(const MutFlexValue &value) {
+    // std::cout << "calling atomic get" << std::endl;
     GenLock before, after;
     do {
       // obtain pre-read generation number

@@ -76,7 +76,7 @@ public:
     std::cout << "Found " << this->num_points_ << " vectors with "
               << this->dim_ << " dims file: " << data_path << std::endl;
     // round up dim to multiple of 16 (good alignment for AVX ops)
-    this->aligned_dim_ = ROUND_UP(dim, 16);
+    this->aligned_dim_ = ROUND_UP(this->dim_, 16);
     std::cout << "Allocating memory for vector data " << std::endl;
     this->data_ = reinterpret_cast<float *>(FASTER::core::aligned_alloc(
         1024, this->max_num_points_ * this->aligned_dim_ * sizeof(float)));
@@ -101,7 +101,7 @@ public:
 
     // compute memory requirement for FASTER store
     uint64_t per_key_memory =
-        sizeof(diskann::FlexibleValue<uint32_t>) + // size of object
+        sizeof(diskann::MutableFlexibleValue<uint32_t>) + // size of object
         (sizeof(uint32_t) * (this->max_degree_ + 1));  // size of neighbors list
     per_key_memory += sizeof(diskann::FixedSizeKey<uint32_t>); // size of key
     per_key_memory = ROUND_UP(per_key_memory, 8);
@@ -118,8 +118,8 @@ public:
 
     /*** 3. Create FASTER store ****/
     this->graph_ =
-        new diskann::MemGraph(this->faster_max_keys_, this->faster_memory_size_,
-                              this->faster_graph_path_);
+        new diskann::MutableGraph(this->faster_max_keys_, this->faster_memory_size_,
+                                  this->faster_graph_path_);
     std::cout << "Created FASTER store for VamanaIndex" << std::endl;
     // std::cout << "Finished configuring index. Call load() to load graph into
     // FASTER store. " << std::endl;
@@ -176,14 +176,22 @@ public:
         graph_reader.read(reinterpret_cast<char *>(nbrs),
                           sizeof(uint32_t) * num_nbrs);
         // read both from FASTER store
-        this->Read(node_id, nbrs2, num_nbrs2);
-        // verify
+        uint64_t node_gen;
+        this->Read(node_id, nbrs2, num_nbrs2, node_gen);
+        // verify if node generation is 0 (inserted for the first time)
+        if (node_gen != 0) {
+          std::cout << "ERROR: node_gen mismatch for node " << node_id
+                    << " (expected = 0, FASTER = " << node_gen << ")" << std::endl;
+          exit(1);
+        }
+        // verify if num_nbrs match
         if (num_nbrs != num_nbrs2) {
           std::cout << "ERROR: num_nbrs mismatch for node " << node_id
                     << " (disk = " << num_nbrs << ", FASTER = " << num_nbrs2
                     << ")" << std::endl;
           exit(1);
         }
+        // verify each neighbor ID for node `node_id`
         for (uint32_t j = 0; j < num_nbrs; j++) {
           if (nbrs[j] != nbrs2[j]) {
             std::cout << "ERROR: nbrs mismatch for node " << node_id
@@ -267,30 +275,30 @@ public:
   }
 
   // prunes list of candidates in `cands` to at-most `max_degree_` best candidates
-  void prune_neighbors(std::pair<uint32_t, float> &cands, std::vector<uint32_t> &pruned_list) {
+  void prune_neighbors(const std::vector<std::pair<uint32_t, float>> &cands, std::vector<uint32_t> &pruned_list) {
     std::vector<float> occlude_factors(cands.size(), 0.0f);
     float alpha = 1.2f;
     // occlude logic
     float cur_alpha = 1;
     while (cur_alpha <= alpha && pruned_list.size() < this->max_degree_) {
       for(uint64_t i=0; i < cands.size() && pruned_list.size() < this->max_degree_; i++) {
-        if (occlude_factor[i] > cur_alpha) {
+        if (occlude_factors[i] > cur_alpha) {
           continue;
         }
         // Set the entry to float::max so that is not considered again
         float* i_vec = this->data_ + (this->aligned_dim_ * (uint64_t) cands[i].first);
-        occlude_factor[i] = std::numeric_limits<float>::max();
+        occlude_factors[i] = std::numeric_limits<float>::max();
         pruned_list.push_back(cands[i].first);
 
         // Update occlude factor for points from i+1 to end of list
         for (uint64_t k = i + 1; k < cands.size(); k++) {
-          if (occlude_factor[k] > alpha)
+          if (occlude_factors[k] > alpha)
             continue;
           float* k_vec = this->data_ + (this->aligned_dim_ * (uint64_t) cands[k].first);
           float djk = diskann::compare<float>(k_vec, i_vec, this->aligned_dim_);
-          occlude_factor[k] =
+          occlude_factors[k] =
               (djk == 0) ? std::numeric_limits<float>::max()
-                          : std::max(occlude_factor[t], cands[k].second / djk);
+                          : std::max(occlude_factors[k], cands[k].second / djk);
         }
       }
       cur_alpha *= 1.2;
@@ -298,7 +306,7 @@ public:
 
     // saturate pruned list to max degree
     for (const auto &cand : cands) {
-      uint32_t node_id = cand.first;
+      const uint32_t node_id = cand.first;
       if (pruned_list.size() >= this->max_degree_)
         break;
       if ((std::find(pruned_list.begin(), pruned_list.end(), node_id) ==
@@ -375,14 +383,15 @@ public:
         // time IO
         {
           uint64_t start_tsc = __builtin_ia32_rdtsc();
-          this->Read(cand.id, beam_nbrs[cur_beam_size], num_nbrs);
+          uint64_t node_gen = 0;
+          this->Read(cand.id, beam_nbrs[cur_beam_size], num_nbrs, node_gen);
           query_stats->io_ticks += (__builtin_ia32_rdtsc() - start_tsc);
           _mm_prefetch((const char *)beam_nbrs[cur_beam_size], _MM_HINT_T0);
         }
         // record IO stats
         query_stats->n_ios++;
         query_stats->read_size += ((num_nbrs) * sizeof(uint32_t) +
-                                   sizeof(diskann::FlexibleValue<uint32_t>));
+                                   sizeof(diskann::MutableFlexibleValue<uint32_t>));
         assert(num_nbrs <= MAX_VAMANA_DEGREE);
         // std::cout << "[" << cur_beam_size << "]" << "Cur node : " <<
         // cur_node_id << "," << cur_node_dist << ", " << num_nbrs << std::endl;
@@ -484,7 +493,8 @@ public:
   uint64_t insert(const float* new_vec, const uint32_t L_index, const float alpha=1.2f, 
                   QueryStats *query_stats = nullptr,
                   QueryContext *ctx = nullptr) {
-    uint64_t new_id = this->last_active_id_.fetch_add(1);
+    uint64_t last_active = this->last_active_id_.fetch_add(1);
+    uint64_t new_id = last_active + 1;
     std::cout << "Inserting new node with ID " << new_id << std::endl;
     // copy vector data to array
     float *new_vec_data = this->data_ + (new_id * this->aligned_dim_);
@@ -492,7 +502,7 @@ public:
 
     // search for neighbors, return closest `L_index` neighbors
     std::vector<uint32_t> knn_idxs(ROUND_UP(L_index, 64), 0);
-    std::vector<float> knn_idxs(ROUND_UP(L_index, 64), 0);
+    std::vector<float> knn_dists(ROUND_UP(L_index, 64), 0);
     this->search(new_vec, L_index, L_index, knn_idxs.data(), knn_dists.data(), nullptr, 1, ctx);
 
     // alloc memory for new neighbors
@@ -513,7 +523,7 @@ public:
     // inter-insert links
     std::vector<uint32_t> nbr_nbrs(this->max_degree_ + 8);
     for(uint64_t i=0; i < pruned_nbrs.size(); i++) {
-      bool retry = True;
+      bool retry = true;
       uint32_t nbr_id = pruned_nbrs[i];
       // (read -> modify -> upsert)
       while(retry) {
@@ -521,8 +531,9 @@ public:
         uint32_t num_nbrs = 0;
         uint64_t nbr_gen = std::numeric_limits<uint64_t>::max();
         this->Read(nbr_id, nbr_nbrs.data(), num_nbrs, nbr_gen);
+
         // add new node to neighbor's neighbor list
-        nbrs[num_nbrs++] = new_id;
+        nbr_nbrs[num_nbrs++] = new_id;
 
         // trigger prune if num_nbrs > max_degree_
         if (num_nbrs > this->max_degree_) {
