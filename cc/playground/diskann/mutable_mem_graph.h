@@ -193,7 +193,7 @@ public:
     // gen number will change if some other thread updated value between Read and PutAtomic
     if (expected_gen_number_ != std::numeric_limits<uint64_t>::max() &&
         expected_gen_number_ != value.gen_lock_.load().gen_number) {
-      std::cout << "PutAtomic failed:: Expected gen #: " << expected_gen_number_ << ", actual gen #: " << value.gen_lock_.load().gen_number << std::endl;
+      // std::cout << "PutAtomic failed:: Expected gen #: " << expected_gen_number_ << ", actual gen #: " << value.gen_lock_.load().gen_number << std::endl;
       // return fail --> caller will retry (read -> inter-insert -> put)
       return false;
     }

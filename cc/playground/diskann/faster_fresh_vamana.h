@@ -243,7 +243,7 @@ public:
               uint64_t node_gen = std::numeric_limits<uint64_t>::max()) {
     auto callback = [](IAsyncContext *ctxt, Status result) {};
     // create upsert context
-    diskann::MutableUpsertContext context{node_id, nbrs, num_nbrs};
+    diskann::MutableUpsertContext context{node_id, nbrs, num_nbrs, node_gen};
     // upsert into store
     auto result = this->graph_->Upsert(context, callback, 1);
     return (result == Status::Ok);
