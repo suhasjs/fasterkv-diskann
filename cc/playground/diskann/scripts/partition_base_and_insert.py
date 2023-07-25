@@ -1,15 +1,22 @@
 import numpy as np
+from argparse import ArgumentParser
 
+parser = ArgumentParser()
 ### Script params ####
 # set path of fbin containing all points
-source_file = "/learn.10M.fbin"
+parser.add_argument("--source_file", type=str, required=True, help="Path of fbin containing all points")
 # set path of base fbin containing points that you will build index on
-base_file = "/base.9M.fbin"
+parser.add_argument("--base_file", type=str, required=True, help="Path of base fbin containing points that you will build index on")
 # set path of insert fbin containing points that you will insert into the built index
-insert_file = "/insert.1M.fbin"
-# partition source points into base + insert
-num_base_pts = 9 * (10**6)
-num_insert_pts = 1 * (10**6)
+parser.add_argument("--insert_file", type=str, required=True, help="Path of insert fbin containing points that you will insert into the built index")
+# get num base points
+parser.add_argument("--num_base_pts", type=int, required=True, help="Number of base points")
+
+args = parser.parse_args()
+source_file = args.source_file
+base_file = args.base_file
+insert_file = args.insert_file
+num_base_pts = args.num_base_pts
 
 # read all data in as np.uint32
 # we don't care about manipulating vector data, only file headers
@@ -19,6 +26,7 @@ print(f"Finished reading fbin with {orig_data[0]} pts x {orig_data[1]} dims.")
 
 # check if we have enough num points
 num_pts, dim = orig_data[0], orig_data[1]
+num_insert_pts = num_pts - num_base_pts
 assert num_pts == (num_base_pts + num_insert_pts), f"Found {num_pts} pts in file, but requested partitioning of {num_base_pts + num_insert_pts} pts"
 
 # create base set of points
