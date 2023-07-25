@@ -32,7 +32,7 @@ base_pts = []
 # create insert set of points
 insert_pts = np.hstack((orig_data[:2], orig_data[base_end_idx:]))
 insert_pts[0] = num_insert_pts
-print(f"Writing base file with {num_base_pts} pts to {base_file}")
+print(f"Writing base file with {num_insert_pts} pts to {insert_file}")
 insert_pts.tofile(insert_file)
 insert_pts = []
 
