@@ -81,7 +81,7 @@ public:
     this->data_ = reinterpret_cast<float *>(FASTER::core::aligned_alloc(
         1024, this->max_num_points_ * this->aligned_dim_ * sizeof(float)));
     // zero out the data array (to set unused dimensions to 0)
-    memset(this->data_, 0, this->max_num_points_ * this->dim_ * sizeof(float));
+    memset(this->data_, 0, this->max_num_points_ * this->aligned_dim_ * sizeof(float));
     // populate vector data from data file
     diskann::populate_from_bin<float>(this->data_, data_path, this->num_points_,
                                       this->dim_, this->aligned_dim_);

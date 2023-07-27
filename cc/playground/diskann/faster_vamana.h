@@ -19,7 +19,7 @@
 
 #define MIN_FASTER_LOG_SIZE (1 << 28)  // 1 GB
 #define FASTER_LOG_ALIGNMENT (1 << 25) // 32 MB
-#define MAX_BEAM_WIDTH (1 << 16)       // max beam width for beam search
+#define MAX_BEAM_WIDTH (1 << 6)       // max beam width for beam search
 #define MAX_VAMANA_DEGREE (1 << 7)     // max degree for Vamana graph
 
 namespace diskann {
@@ -56,7 +56,7 @@ public:
     this->data_ = reinterpret_cast<float *>(FASTER::core::aligned_alloc(
         1024, this->num_points_ * this->aligned_dim_ * sizeof(float)));
     // zero out the data array (to set unused dimensions to 0)
-    memset(this->data_, 0, this->num_points_ * this->dim_ * sizeof(float));
+    memset(this->data_, 0, this->num_points_ * this->aligned_dim_ * sizeof(float));
     // populate vector data from data file
     diskann::populate_from_bin<float>(this->data_, data_path, this->num_points_,
                                       this->dim_, this->aligned_dim_);

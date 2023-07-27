@@ -106,11 +106,11 @@ inline void populate_from_bin(T *data, const std::string &filename,
   // read the data
   if (read_dim == dim) {
     // if the data is aligned, read it in one go
-    reader.read((char *)data, npts * dim * sizeof(T));
+    reader.read((char *)data, (uint64_t) npts * (uint64_t) dim * sizeof(T));
   } else {
     // if the data is not aligned, read it point by point
     for (uint32_t i = 0; i < npts; i++) {
-      reader.read((char *)(data + i * read_dim), dim * sizeof(T));
+      reader.read((char *)(data + (uint64_t) i * (uint64_t) read_dim), dim * sizeof(T));
     }
   }
   // std::cout << "Finished reading npts: " << npts << ", dim: " << dim << "
